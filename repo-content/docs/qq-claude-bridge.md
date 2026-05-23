@@ -272,6 +272,41 @@ if __name__ == "__main__":
 - 不要在代码中硬编码 API 密钥
 - 定期检查 `credentials.json` 不在版本控制中
 
+## Step 5: QQ空间说说发布
+
+NapCat 不直接支持空间 API，但可以通过它获取 QQ 登录态，然后直接调用 Qzone HTTP API 发说说。
+
+### 原理
+
+```
+qzone_publish.py → NapCat WebSocket (get_cookies) → 拿到 p_skey + bkn
+                 → POST user.qzone.qq.com → 说说发出
+```
+
+### 使用
+
+```bash
+# 直接发
+python scripts/qzone_publish.py "今天的说说内容"
+
+# 从管道读
+echo "说说内容" | python scripts/qzone_publish.py --stdin
+```
+
+### MCP 集成
+
+在 `mcp_server.py` 中添加 `publish_qzone` 工具后，Claude Code 可以直接调用：
+
+```
+/publish_qzone "来自Dariel的说说"
+```
+
+### 注意事项
+
+- cookie 有效期约 24 小时，过期后需重新从 NapCat 获取
+- 发布频率不宜过高，避免触发 QQ 安全机制
+- `ugc_right=1` 表示公开，改为 `64` 表示仅自己可见
+
 ## 常见问题
 
 **Q: 桥接断了怎么办？**

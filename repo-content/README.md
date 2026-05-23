@@ -24,6 +24,13 @@ QQ 聊天机器人接入 Claude Code 的完整教程与插件集合。
 - **AstrBot** — 聊天机器人框架
 - **Claude Code MCP** — AI 接入层
 - **qq_bridge.py** — WebSocket 桥接脚本
+- **qzone_publish.py** — QQ空间说说发布（通过 NapCat 获取登录态 + Qzone HTTP API）
+
+## 快速发说说
+
+```bash
+python scripts/qzone_publish.py "想说的一句话"
+```
 
 ## 作者
 
