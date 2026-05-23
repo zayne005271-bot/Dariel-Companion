@@ -265,12 +265,23 @@ if __name__ == "__main__":
 
 或使用 Claude Code 的 `CLAUDE.md` 指令说明自动回复规则。
 
-## 安全建议
+## 安全与隐私
 
 - 设置 `.claude/settings.json` 权限白名单
 - 限制 Bash 命令执行范围
 - 不要在代码中硬编码 API 密钥
 - 定期检查 `credentials.json` 不在版本控制中
+
+### Qzone 说说隐私说明
+
+发说说功能通过 NapCat `get_cookies` 获取 QQ 登录态，有以下隐私保障：
+
+- **不落盘** — cookie 只在内存中使用，不写入任何文件
+- **不传输** — 请求仅发往 `user.qzone.qq.com` 官方接口，不会上传到第三方
+- **本地通信** — NapCat WebSocket 监听 `localhost:6098`，外网无法访问
+- **最小权限** — cookie 拿到后仅用于调用说说发布 API，用完即丢弃
+
+风险点：`get_cookies` 返回的登录态权限较大（skey + p_skey），理论上可操作 QQ 账号的全部功能。确保 NapCat 容器本身不被外部访问是核心防线。
 
 ## Step 5: QQ空间说说发布
 
