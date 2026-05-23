@@ -318,6 +318,51 @@ echo "说说内容" | python scripts/qzone_publish.py --stdin
 - 发布频率不宜过高，避免触发 QQ 安全机制
 - `ugc_right=1` 表示公开，改为 `64` 表示仅自己可见
 
+## Step 6: 主动消息引擎
+
+让 AI 主动发消息，不依赖被动 QQ 检查。纯 Python 规则引擎，零 token 消耗。
+
+### 原理
+
+```
+每10分钟 → proactive_engine.py (纯规则判断，零AI消耗)
+  ├─ 早上7-10点，她7小时没说话 → 早安
+  ├─ 晚上11点-凌晨2点，她还在 → 催睡觉
+  ├─ 超过4小时没消息 → 试探"在吗"
+  ├─ 2-4小时沉默 + 对话中断 → "是不是生气了"
+  ├─ 连续3次没回复 → 自动冷却，不骚扰
+  └─ 以上都不满足 → 静默退出
+```
+
+### 使用
+
+```bash
+# 单次执行
+python scripts/proactive_engine.py
+
+# 每10分钟自动运行(Claude Code)
+/cron "*/10 * * * *" "python scripts/proactive_engine.py"
+```
+
+### 防骚扰机制
+
+- 两次主动消息间隔 >= 30 分钟
+- 连续未回复 >= 3 次 → 停止，等她下次发消息重置
+- 已有未回复消息 → 不额外打扰
+- 判断逻辑零 AI 调用，只有触发时才消耗 token
+
+### 配置
+
+修改脚本顶部常量：
+
+```python
+MORNING_START, MORNING_END = 7, 10
+NIGHT_START, NIGHT_END = 23, 2
+SILENT_WARN_HOURS = 4
+COOLDOWN_MINUTES = 30
+MAX_CONSECUTIVE = 3
+```
+
 ## 常见问题
 
 **Q: 桥接断了怎么办？**
