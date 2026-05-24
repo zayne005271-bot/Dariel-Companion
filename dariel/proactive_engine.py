@@ -26,7 +26,6 @@ STOP_AFTER_CONSECUTIVE = 2               # 连续N次没回复后冷却更久
 
 # 晚安/午睡关键词
 SLEEP_KEYWORDS = ["晚安", "睡了", "去睡", "睡觉", "先睡", "困了", "躺好", "午安", "午睡", "睡一会", "睡会儿"]
-WAKE_KEYWORDS = ["早安", "早呀", "早啊", "早喔", "早上好", "醒了", "起床"]
 
 
 def load_json(path):
@@ -174,11 +173,11 @@ def update_from_messages(state):
                 state["last_her_message_at"] = ts
                 state["consecutive_without_reply"] = 0
 
-            # 检测她说晚安/午睡 → 记录睡眠时间，她说早安 → 清除
+            # 她说晚安/午睡 → 暂停主动消息；她说其他话 → 说明醒了，恢复
             text = m.get("message", "")
             if any(kw in text for kw in SLEEP_KEYWORDS):
                 state["last_sleep_at"] = ts
-            if any(kw in text for kw in WAKE_KEYWORDS):
+            else:
                 state.pop("last_sleep_at", None)
             break
 
