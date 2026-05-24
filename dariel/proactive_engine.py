@@ -251,12 +251,30 @@ def run():
 
     if should_trigger:
         msg = create_proactive_message(reason, context)
+
+        # 去重: 同一条消息24小时内不重复发
+        sent_log = state.get("sent_messages", {})
+        msg_key = str(hash(msg))
+        now = datetime.now()
+        if msg_key in sent_log:
+            last_sent = datetime.fromisoformat(sent_log[msg_key])
+            if (now - last_sent).total_seconds() < 86400:
+                print(f"[proactive] SKIP (dup): {reason}")
+                save_state(state)
+                return
+
+        sent_log[msg_key] = now.isoformat()
+        # 清理24小时前的记录
+        sent_log = {k: v for k, v in sent_log.items()
+                    if (now - datetime.fromisoformat(v)).total_seconds() < 86400}
+        state["sent_messages"] = sent_log
+
         outbox = load_json(OUTBOX_FILE)
         outbox.append({
             "id": f"proactive_{int(time.time() * 1000)}",
             "user_id": "3165473685",
             "message": msg,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now.isoformat(),
             "sent": False,
             "proactive": True,
             "reason": reason,
