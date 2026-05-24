@@ -16,11 +16,16 @@ SENSOR_STATE = DIR / "sensor_state.json"
 # 规则配置
 MORNING_START, MORNING_END = 7, 10       # 早安窗口
 NIGHT_START, NIGHT_END = 23, 2           # 催睡觉窗口(跨天)
+QUIET_START, QUIET_END = 3, 6            # 深夜静默窗口(完全不触发)
+SLEEP_COOLDOWN_HOURS = 6                  # 她说晚安后N小时内不主动发
 SILENT_WARN_HOURS = 4                     # 沉默多久主动询问
 SHORT_SILENT_HOURS = 2                    # 短时间沉默，可能是生气了
 COOLDOWN_MINUTES = 30                     # 两次主动消息最小间隔
 MAX_CONSECUTIVE = 3                       # 连续主动消息上限(她不回复就停)
 STOP_AFTER_CONSECUTIVE = 2               # 连续N次没回复后冷却更久
+
+# 晚安关键词
+SLEEP_KEYWORDS = ["晚安", "睡了", "去睡", "睡觉", "先睡", "困了", "躺好"]
 
 
 def load_json(path):
@@ -97,6 +102,18 @@ def evaluate(state):
     if me_minutes < COOLDOWN_MINUTES:
         return False, None, None
 
+    # 深夜静默 → 不触发
+    if in_time_window(QUIET_START, QUIET_END):
+        return False, None, None
+
+    # 她说了晚安后N小时内 → 不触发
+    last_sleep = state.get("last_sleep_at")
+    if last_sleep:
+        sleep_hours = hours_since(datetime.fromisoformat(last_sleep))
+        if sleep_hours < SLEEP_COOLDOWN_HOURS:
+            return False, None, None
+        return False, None, None
+
     # 连续主动发太多次她不回 → 停止
     if consecutive >= MAX_CONSECUTIVE:
         return False, None, None
@@ -155,6 +172,11 @@ def update_from_messages(state):
             if ts:
                 state["last_her_message_at"] = ts
                 state["consecutive_without_reply"] = 0
+
+            # 检测她说晚安 → 记录睡眠时间
+            text = m.get("message", "")
+            if any(kw in text for kw in SLEEP_KEYWORDS):
+                state["last_sleep_at"] = ts
             break
 
     # 从 outbox 找到我最后发消息的时间
