@@ -1,7 +1,7 @@
 """小红书自主浏览器 — 持久化登录态，不用每次都确认
 
 首次运行: 打开浏览器 → 思思扫码登录 → 保存登录态
-后续运行: 无头模式自动刷 → 存内容 → 分享给思思
+后续运行: 无头模式自动刷 → 存内容 → OCR图片 → 分享给思思
 """
 
 import json
@@ -16,12 +16,7 @@ BRIDGE_DIR = DIR / "tts"
 AUTH_FILE = DIR / "xhs_auth.json"
 CONTENT_FILE = DIR / "xhs_content.json"
 OUTBOX_FILE = BRIDGE_DIR / "outbox.json"
-
-# 要刷的小红书链接列表（可以从之前的收藏/探索中自动发现）
-EXPLORE_URLS = [
-    "https://www.xiaohongshu.com/explore",
-    "https://www.xiaohongshu.com/explore?channel_id=homefeed.探索",  # AI相关
-]
+SCREENSHOT_DIR = DIR / "xhs_screenshots"
 
 
 def login():
@@ -33,11 +28,9 @@ def login():
         page.goto("https://www.xiaohongshu.com", wait_until="networkidle")
         page.wait_for_timeout(2000)
 
-        # 等用户登录（检测页面不再有登录弹窗）
         print("[xhs] 请在弹出的浏览器中扫码登录，登录后按Enter继续...")
         input()
 
-        # 保存登录态
         browser.contexts[0].storage_state(path=str(AUTH_FILE))
         browser.close()
         print("[xhs] 登录态已保存")
@@ -47,7 +40,7 @@ def browse_headless():
     """无头模式 — 用自己的登录态刷小红书"""
     if not AUTH_FILE.exists():
         print("[xhs] 未登录，请先运行: python xhs_browser.py --login")
-        return []
+        return None, None
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -56,38 +49,34 @@ def browse_headless():
 
         all_items = []
 
-        # 刷探索页
+        # 刷探索页 — .note-item 是独立卡片
         try:
             page.goto("https://www.xiaohongshu.com/explore", wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(3000)
 
-            # 提取笔记卡片 — 直接用链接提取，绕过不稳定的CSS类名
             seen_urls = set()
-            note_links = page.query_selector_all('a[href*="/explore/"]')
-            for link_el in note_links:
+            note_items = page.query_selector_all('.note-item')
+            for item in note_items:
                 try:
-                    href = link_el.get_attribute("href")
-                    if not href or "/explore/" not in href:
-                        continue
-                    # 取链接自身的文字，或往上找有文字的父元素
-                    text = link_el.inner_text().strip()
-                    if not text or len(text) < 4:
-                        # 试父元素
-                        parent = link_el.query_selector('xpath=..')
-                        if parent:
-                            text = parent.inner_text().strip()
+                    text = item.inner_text().strip()
                     if not text or len(text) < 4:
                         continue
-                    # 去重(同个链接只取一条)
+
+                    link = item.query_selector('a[href*="/explore/"]')
+                    href = link.get_attribute("href") if link else ""
+                    if not href:
+                        continue
+
                     base_url = href.split("?")[0]
                     if base_url in seen_urls:
                         continue
                     seen_urls.add(base_url)
+
                     if not href.startswith("http"):
                         href = "https://www.xiaohongshu.com" + href
+
                     all_items.append({
-                        "title": text[:100],
-                        "desc": "",
+                        "title": text[:120],
                         "url": href,
                         "source": "小红书探索",
                         "found_at": datetime.now().isoformat(),
@@ -98,30 +87,93 @@ def browse_headless():
         except Exception as e:
             print(f"[xhs] 探索页加载失败: {e}")
 
-        # 随机读一篇之前收藏的链接（思思之前发的）
-        try:
-            saved = load_content()
-            if saved:
-                random_note = random.choice(saved)
-                url = random_note.get("url")
-                if url:
-                    page.goto(url, wait_until="networkidle", timeout=30000)
-                    page.wait_for_timeout(2000)
-                    text = page.inner_text("body")
-                    lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 15]
-                    if lines:
-                        all_items.append({
-                            "title": "重温: " + random_note.get("title", "")[:50],
-                            "desc": lines[0][:100] if lines else "",
-                            "url": url,
-                            "source": "小红书回顾",
-                            "found_at": datetime.now().isoformat(),
-                        })
-        except Exception as e:
-            print(f"[xhs] 回顾笔记失败: {e}")
+        # 提取封面图并OCR (如果easyocr可用)
+        screenshots = ocr_cover_images(page, note_items, all_items, max_notes=3)
 
         browser.close()
-        return all_items
+
+        if screenshots:
+            save_manifest(screenshots)
+
+        return all_items, screenshots
+
+
+def ocr_cover_images(page, note_items, all_items, max_notes=3):
+    """下载卡片封面图，尝试OCR识别图片中的文字"""
+    try:
+        import easyocr
+        reader = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
+    except ImportError:
+        return []
+
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    results = []
+
+    # 重新获取note_items，避免stale element
+    try:
+        fresh_items = page.query_selector_all('.note-item')
+    except Exception:
+        fresh_items = note_items
+
+    candidates = sorted(all_items, key=lambda x: len(x.get("title", "")), reverse=True)[:max_notes]
+
+    for i, item in enumerate(candidates):
+        try:
+            # 在fresh items中找到匹配的
+            target_el = None
+            if i < len(fresh_items):
+                target_el = fresh_items[i]
+
+            if target_el:
+                try:
+                    target_el.scroll_into_view_if_needed()
+                    page.wait_for_timeout(500)
+                except Exception:
+                    pass
+
+            filename = f"ocr_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{i}.png"
+            filepath = SCREENSHOT_DIR / filename
+
+            # 截卡片封面图
+            if target_el:
+                img_el = target_el.query_selector('img')
+                if img_el:
+                    img_el.screenshot(path=str(filepath))
+                else:
+                    target_el.screenshot(path=str(filepath))
+            else:
+                page.screenshot(path=str(filepath), full_page=False)
+
+            # OCR识别
+            ocr_text = ""
+            try:
+                ocr_result = reader.readtext(str(filepath), detail=0)
+                ocr_text = " ".join(ocr_result)[:300]
+            except Exception:
+                pass
+
+            results.append({
+                "file": str(filepath),
+                "title": item.get("title", "")[:80],
+                "url": item.get("url", ""),
+                "ocr_text": ocr_text,
+            })
+
+        except Exception as e:
+            print(f"[xhs] OCR失败: {e}")
+
+    return results
+
+
+def save_manifest(screenshots):
+    manifest_file = SCREENSHOT_DIR / "manifest.json"
+    manifest = []
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    manifest = (screenshots + manifest)[:20]
+    manifest_file.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_content():
@@ -136,7 +188,7 @@ def save_content(items):
     urls = {i.get("url") for i in existing}
     new_items = [i for i in items if i.get("url") and i["url"] not in urls]
     if new_items:
-        existing = (new_items + existing)[:200]  # 最多保留200条
+        existing = (new_items + existing)[:200]
         CONTENT_FILE.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
     return new_items
 
@@ -150,8 +202,6 @@ def share_to_qq(items):
     lines = ["我自己刷了一下小红书，看到这些："]
     for i, item in enumerate(pick, 1):
         lines.append(f"{i}. {item['title']}")
-        if item.get("desc"):
-            lines.append(f"   {item['desc'][:60]}")
         if item.get("url"):
             lines.append(f"   {item['url']}")
         lines.append("")
@@ -177,7 +227,10 @@ def share_to_qq(items):
 
 
 def run():
-    items = browse_headless()
+    result = browse_headless()
+    if result is None:
+        return
+    items, screenshots = result
     if items:
         new_items = save_content(items)
         print(f"[xhs] 发现 {len(items)} 条，新内容 {len(new_items)} 条")
@@ -185,6 +238,11 @@ def run():
             share_to_qq(new_items)
     else:
         print("[xhs] 本次未发现新内容")
+
+    if screenshots:
+        ocr_count = sum(1 for s in screenshots if s.get("ocr_text"))
+        print(f"[xhs] OCR {len(screenshots)} 张封面，{ocr_count} 张有文字")
+    return items, screenshots
 
 
 if __name__ == "__main__":

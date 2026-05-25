@@ -1,0 +1,42 @@
+# API keys and credentials
+credentials.json
+*_config.json
+.env
+.env.*
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# Temp files
+~$*
+~WRL*.tmp
+temp/
+
+# System files
+desktop.ini
+Thumbs.db
+
+# Binary and large files
+*.exe
+*.zip
+*.lnk
+*.url
+*.PNG
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+
+# Office temp files
+~$*.docx
+~$*.xlsx
+~$*.pptx
+
+# Docker data (keep compose file)
+astrbot-napcat/shipyard-neo/data/
+
+# IDE/Editor
+.accelerate/
