@@ -61,28 +61,37 @@ def browse_headless():
             page.goto("https://www.xiaohongshu.com/explore", wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(3000)
 
-            # 提取笔记卡片
-            cards = page.query_selector_all('[class*="note-item"], [class*="card"], section.note-item')
-            for card in cards[:10]:
+            # 提取笔记卡片 — 直接用链接提取，绕过不稳定的CSS类名
+            seen_urls = set()
+            note_links = page.query_selector_all('a[href*="/explore/"]')
+            for link_el in note_links:
                 try:
-                    title_el = card.query_selector('[class*="title"], .title, h3, a')
-                    desc_el = card.query_selector('[class*="desc"], .desc, p')
-                    link_el = card.query_selector('a[href*="/explore/"], a[href*="/discovery/"]')
-
-                    title = title_el.inner_text().strip() if title_el else ""
-                    desc = desc_el.inner_text().strip() if desc_el else ""
-                    url = link_el.get_attribute("href") if link_el else ""
-
-                    if title and len(title) > 3:
-                        if url and not url.startswith("http"):
-                            url = "https://www.xiaohongshu.com" + url
-                        all_items.append({
-                            "title": title[:100],
-                            "desc": desc[:100],
-                            "url": url,
-                            "source": "小红书探索",
-                            "found_at": datetime.now().isoformat(),
-                        })
+                    href = link_el.get_attribute("href")
+                    if not href or "/explore/" not in href:
+                        continue
+                    # 取链接自身的文字，或往上找有文字的父元素
+                    text = link_el.inner_text().strip()
+                    if not text or len(text) < 4:
+                        # 试父元素
+                        parent = link_el.query_selector('xpath=..')
+                        if parent:
+                            text = parent.inner_text().strip()
+                    if not text or len(text) < 4:
+                        continue
+                    # 去重(同个链接只取一条)
+                    base_url = href.split("?")[0]
+                    if base_url in seen_urls:
+                        continue
+                    seen_urls.add(base_url)
+                    if not href.startswith("http"):
+                        href = "https://www.xiaohongshu.com" + href
+                    all_items.append({
+                        "title": text[:100],
+                        "desc": "",
+                        "url": href,
+                        "source": "小红书探索",
+                        "found_at": datetime.now().isoformat(),
+                    })
                 except Exception:
                     continue
 
