@@ -23,7 +23,6 @@ REQUIRED_FILES = [
     DIR / "xhs_browser.py",
     DIR / "unified_mcp.py",
     DIR / "wake.py",
-    DIR / "push_notify.py",
     DIR / "restart_bridge.py",
     BRIDGE_DIR / "qq_bridge.py",
     BRIDGE_DIR / "mcp_server.py",
