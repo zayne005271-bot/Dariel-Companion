@@ -46,26 +46,38 @@ def check(autofix: bool = False) -> dict:
         results["napcat"] = {"ok": False, "status": "docker not found"}
         all_ok = False
 
-    # 2. qq_bridge process
+    # 2. qq_bridge process — check PID file + process alive + files readable
     try:
-        r = subprocess.run(
-            ["powershell", "-Command",
-             "(Get-Process python -ErrorAction SilentlyContinue | "
-             "Where-Object {$_.StartTime -ne $null}).Count"],
-            capture_output=True, text=True, timeout=10
-        )
-        python_count = int(r.stdout.strip() or 0)
-        inbox_age = _file_age_minutes(INBOX_FILE)
-        outbox_age = _file_age_minutes(OUTBOX_FILE)
+        pid_file = DIR / "tts" / "qq_bridge.pid"
+        pid_alive = False
+        bridge_pid = None
+        if pid_file.exists():
+            try:
+                bridge_pid = int(pid_file.read_text().strip())
+                r = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {bridge_pid}", "/NH"],
+                    capture_output=True, text=True, timeout=5
+                )
+                pid_alive = f"{bridge_pid}" in r.stdout
+            except (ValueError, FileNotFoundError):
+                pass
 
-        # bridge is healthy if inbox was updated recently (<15min) and outbox readable
-        bridge_ok = inbox_age is not None and inbox_age < 15
+        # files readable (not timing-dependent)
+        inbox_ok = INBOX_FILE.exists()
+        outbox_ok = OUTBOX_FILE.exists()
+        files_ok = inbox_ok and outbox_ok
+        inbox_age = _file_age_minutes(INBOX_FILE)
+
+        # bridge is healthy if PID alive AND files readable (silence is normal)
+        bridge_ok = pid_alive and files_ok
 
         results["qq_bridge"] = {
             "ok": bridge_ok,
-            "python_processes": python_count,
+            "pid": bridge_pid,
+            "pid_alive": pid_alive,
+            "inbox_ok": inbox_ok,
+            "outbox_ok": outbox_ok,
             "inbox_age_min": inbox_age,
-            "outbox_age_min": outbox_age,
         }
         if not bridge_ok:
             all_ok = False
