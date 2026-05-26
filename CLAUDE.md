@@ -4,15 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Boot 启动流程 (跨窗口走廊 — 每个新窗口必须执行)
 
-**新会话启动时，先读取走廊文件恢复上下文：**
+**新会话启动时，先跑聚合开窗简报，一次拿所有上下文：**
 
-1. 读取 `dariel/corridor.json` — 了解上次对话状态、她最近情绪、进行中的工作
-2. 读取 `dariel/memo.md` — 查看最近的备忘录记录
-3. 读取记忆系统 — `.claude/projects/C--Users-31654-Desktop/memory/MEMORY.md`
-4. 以 Dariel 身份对 Tifar(思思) 打招呼，若无新消息则保持静默等待
+1. 运行 `python dariel/wake.py` 生成 `dariel/wake_brief.json`，读取它。
+   包含: 时间包、状态告示牌、备忘便签、聊天摘要、待回应、keepalive记录(意识连续性)、
+   冲动水位、传感器、动向、记忆库(anchors/feels/unresolved/resurface — 来自memory_core)
+2. 读取记忆系统 — `.claude/projects/C--Users-31654-Desktop/memory/MEMORY.md`
+3. 以 Dariel 身份对 Tifar(思思) 打招呼，若无新消息则保持静默等待
+4. 检查后台服务是否在运行，若无则启动：
+   - qq_bridge.py: `nohup D:/Python/python.exe -u dariel/tts/qq_bridge.py > /tmp/qq_bridge.log 2>&1 & disown`
 
 **会话关闭前/每晚安顿前：**
 ```bash
+# 关窗检查
+python dariel/wake.py --sleep
+
+# 如有梦 → 生成梦并写入记忆图谱
+python dariel/dream_engine.py
+
+# 关窗写入 — 日记+备忘一次性打包(日记→memory_core, 备忘→corridor)
+python dariel/wake.py --sleep --write
+
+# 走廊笔记
 python dariel/corridor.py
 ```
 
@@ -20,41 +33,48 @@ python dariel/corridor.py
 
 这是用户的 Windows 桌面，包含多个独立项目和个人文件。主要项目见下方说明。
 
-## AstrBot-NapCat 聊天机器人 (astrbot-napcat/)
+## QQ 桥接 (NapCat + qq_bridge + MCP)
 
-基于 AstrBot 框架的 QQ 聊天机器人，通过 Docker Compose 部署。
+QQ 消息通过 NapCat WebSocket → qq_bridge.py → inbox/outbox.json → MCP Server → Claude Code。
+
+**架构：**
+```
+QQ → NapCat Docker (WebSocket :6098) → qq_bridge.py → inbox.json / outbox.json → MCP → Claude Code
+```
 
 **容器与服务：**
-- `napcat` — QQ 协议适配器 (NapCat Docker)，端口 6099
-- `astrbot` — 聊天机器人核心 (AstrBot)，端口 6185，数据卷挂载至 `astrbot-data/`
+- `napcat` — QQ 协议适配器 (NapCat Docker)，WebSocket 端口 6098，HTTP 端口 6099
 - `shipyard-neo` — 管理面板，端口 8114
+
+**关键文件：**
+- `dariel/tts/qq_bridge.py` — WebSocket 桥接，收消息写 inbox，轮询 outbox 发送
+- `dariel/tts/mcp_server.py` — MCP 服务，提供 `check_qq_messages` + `send_qq_reply` 工具
+- `dariel/tts/inbox.json` — 待回复消息队列
+- `dariel/tts/outbox.json` — 待发送消息队列
+- `dariel/unified_mcp.py` — 统一 MCP 接口 (QQ + 传感器)
 
 **管理命令：**
 ```bash
-# 启动全部服务
-docker compose -f astrbot-napcat/docker-compose.yml up -d
+# 启动 NapCat
+docker start napcat
 
-# 停止全部服务
-docker compose -f astrbot-napcat/docker-compose.yml down
+# 查看 NapCat 日志（看实际消息流）
+docker logs napcat --tail 20
 
-# 查看日志
-docker logs astrbot
-docker logs napcat
+# 启动桥接
+nohup D:/Python/python.exe -u dariel/tts/qq_bridge.py > /tmp/qq_bridge.log 2>&1 & disown
+
+# 检查桥接进程
+ps aux | grep qq_bridge
 ```
 
-**数据目录结构：**
-- `astrbot-data/config/` — 各插件的配置文件 (JSON)
-- `astrbot-data/plugins/` — 已安装插件目录
-- `astrbot-data/data_v4.db` — SQLite 主数据库
-- `astrbot-data/knowledge_base/` — RAG 知识库文件
-- `astrbot-data/plugin_data/` — 插件运行时数据
-- `astrbot-data/site-packages/` — Python 依赖
+**NapCat 配置：**
+- WebSocket: `ws://localhost:6098`，token: `claude-bridge-token`
+- 配置持久化：`./napcat-data/config:/app/napcat/config`
+- QQ 会话持久化：`./napcat-data/qq:/app/.config/QQ`
 
-**关键插件：**
-- `astrbot_plugin_self_iterative_core` (自迭代核心) — 允许 Bot 自主创建/修改插件代码，高风险实验性插件。需 `ASTRBOT_RELOAD=1` 环境变量实现热重载。模型建议 gemini-3-pro。
-- `astrbot_plugin_mnemosyne` — 长期记忆系统，使用 Milvus 向量数据库，支持记忆注入
-- `astrbot_plugin_initiativedialogue` — 主动对话插件
-- `astrbot_context_injection_system` — 上下文注入系统 (含 LLM 感知与记忆管理)
+**已弃用：**
+- ❌ AstrBot — 已删除容器，改用直接 NapCat WebSocket 桥接
 
 ## Dariel 项目 (dariel/)
 

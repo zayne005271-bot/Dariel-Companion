@@ -305,10 +305,26 @@ def run():
     dream = generate_dream(seed)
     dreams = load_dreams()
     dreams.append(dream)
-    dreams = dreams[-50:]  # 保留最近50个梦
+    dreams = dreams[-50:]
     save_dreams(dreams)
 
-    print(f"[dream] NEW: {dream['title']}")
+    # 梦写入记忆图谱 — 梦不是装饰，是记忆系统的一部分
+    try:
+        from memory_core import write_memory
+        mem = write_memory(
+            content=dream["dream"],
+            memory_type="dream",
+            importance=3,
+            tags=f"梦,{dream['emotion_source']},{dream['atmosphere']}",
+            source="dream_engine",
+        )
+        dream["memory_id"] = mem.get("id")
+        dream["similar_memories"] = [s.get("content", "")[:60] for s in mem.get("similar", [])]
+    except Exception as e:
+        dream["memory_id"] = None
+        dream["memory_error"] = str(e)
+
+    print(f"[dream] NEW: {dream['title']} → memory #{dream.get('memory_id')}")
     return dream
 
 
