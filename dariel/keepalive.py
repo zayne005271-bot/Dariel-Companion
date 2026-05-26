@@ -400,6 +400,9 @@ def run():
         if reason == "cache_warmup":
             warmed = cache_warmup()
         save_state(state)
+        # 清理旧trigger，避免下次读到过期上下文
+        trigger_file = DIR / "keepalive_trigger.json"
+        trigger_file.unlink(missing_ok=True)
         return None
 
     # 生成唤醒提示 → 写入trigger文件
