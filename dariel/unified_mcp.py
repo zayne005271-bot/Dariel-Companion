@@ -116,14 +116,10 @@ async def _reply(user_id: str, message: str):
     if not user_id or not message:
         return [TextContent(type="text", text="Need user_id and message.")]
 
-    # 先标记已回复(原子写)，再写outbox — 减少竞态窗口
+    # 只标记确实未回复的消息，不阻止后续追加回复
     inbox = json.loads(INBOX_FILE.read_text(encoding="utf-8"))
-    already_replied = all(m.get("replied", False) for m in inbox if m["user_id"] == user_id)
-    if already_replied:
-        return [TextContent(type="text", text="Already replied.")]
-
     for m in inbox:
-        if m["user_id"] == user_id:
+        if m["user_id"] == user_id and not m.get("replied", False):
             m["replied"] = True
     _atomic_write(INBOX_FILE, inbox)
 
