@@ -10,6 +10,8 @@
       "Bash(D:/Python/python.exe -u dariel/send_voice.py *)",
       "Bash(contains: ansi_c_string)",
       "Bash(D:/Python/python.exe dariel/keepalive.py *)",
+      "Bash(python dariel/keepalive.py *)",
+      "Bash(D:/Python/python.exe dariel/xhs_browser.py *)",
       "Bash(D:/Python/python.exe -c *)"
     ]
   },
