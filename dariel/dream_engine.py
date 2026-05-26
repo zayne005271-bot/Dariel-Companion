@@ -214,33 +214,45 @@ def generate_dream(seed: dict) -> dict:
     # 收集碎片
     fragments = []
 
-    # 1. 从主导情绪取1-2个碎片
+    # 1. 从主导情绪取1个碎片
     emotion_frags = DREAM_FRAGMENTS.get(emotion, DREAM_FRAGMENTS["neutral"])
-    fragments.extend(random.sample(emotion_frags, min(2, len(emotion_frags))))
+    fragments.append(random.choice(emotion_frags))
 
     # 2. 从关系动态取1个碎片
     try:
         relationship = load_json(RELATIONSHIP_FILE)
-        phase = relationship.get("phase", "building")
         dynamic = _get_relationship_dynamic(relationship)
-
         if dynamic in RELATIONSHIP_FRAGMENTS:
-            frags = RELATIONSHIP_FRAGMENTS[dynamic]
-            fragments.append(random.choice(frags))
+            fragments.append(random.choice(RELATIONSHIP_FRAGMENTS[dynamic]))
     except Exception:
         pass
 
-    # 3. 如果今天有强情绪波动，加一个对应碎片
+    # 3. 分层梦素材: 从真实记忆编织碎片
+    materials = seed.get("materials", {})
+    memory_snippets = []
+    for layer_name, layer_label in [("diary", "日记"), ("corridor", "走廊"), ("other", "记忆")]:
+        layer_items = materials.get(layer_name, [])
+        for item in layer_items:
+            snippet = item.get("content", "")[:60]
+            if snippet:
+                memory_snippets.append(snippet)
+
+    if memory_snippets:
+        # 取1-2个真实记忆碎片混入梦境
+        picked = random.sample(memory_snippets, min(2, len(memory_snippets)))
+        for p in picked:
+            fragments.append(f"梦到一段碎片: \"{p}...\"")
+
+    # 4. 如果今天有强情绪波动，加一个对应碎片
     for e in events[-5:]:
         ev_emotion = e.get("emotion", "neutral")
         if ev_emotion != emotion and ev_emotion in DREAM_FRAGMENTS:
-            alt_frags = DREAM_FRAGMENTS[ev_emotion]
-            fragments.append(random.choice(alt_frags))
+            fragments.append(random.choice(DREAM_FRAGMENTS[ev_emotion]))
             break
 
-    # 4. 随机打乱—梦境没有逻辑顺序
+    # 5. 随机打乱—梦境没有逻辑顺序
     random.shuffle(fragments)
-    fragments = fragments[:4]  # 最多4个碎片
+    fragments = fragments[:5]  # 最多5个碎片(含真实记忆)
 
     # 组装梦
     atmosphere = random.choice(ATMOSPHERES[atmosphere_key])
@@ -301,6 +313,14 @@ def run():
     if not should:
         print(f"[dream] SKIP: {reason}")
         return None
+
+    # 分层梦素材: 从记忆库抽3日记+2走廊+2其他 → 注入梦境
+    try:
+        from memory_core import get_dream_materials
+        materials = get_dream_materials()
+        seed["materials"] = materials
+    except Exception:
+        seed["materials"] = {"diary": [], "corridor": [], "other": []}
 
     dream = generate_dream(seed)
     dreams = load_dreams()

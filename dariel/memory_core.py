@@ -36,14 +36,104 @@ DECAY_ACTIVE = 2.0    # ≥2.0: 活跃，正常参与召回
 DECAY_FADING = 0.5    # 0.5-2.0: 正在被忘，还能被想起
 # <0.5: archived，沉到水底，不再参与日常召回但仍可搜索
 
-# 衰减配置 — 每24小时衰减量
+# 幂律衰减配置 — decay_score = 10 * (1 + days/tau)^(-alpha)
+# 早期遗忘快，后期趋于平稳，接近人类遗忘曲线
 DECAY_CONFIG = {
-    5: {"rate": 0.0,    "label": "永驻",   "lifespan_days": float("inf")},
-    4: {"rate": 0.06,   "label": "很慢",   "lifespan_days": 90},
-    3: {"rate": 0.18,   "label": "正常",   "lifespan_days": 30},
-    2: {"rate": 0.40,   "label": "较快",   "lifespan_days": 14},
-    1: {"rate": 1.80,   "label": "很快",   "lifespan_days": 3},
+    5: {"tau": float("inf"), "alpha": 0,   "label": "永驻"},
+    4: {"tau": 50,  "alpha": 0.8, "label": "很慢"},
+    3: {"tau": 15,  "alpha": 0.8, "label": "正常"},
+    2: {"tau": 7,   "alpha": 0.8, "label": "较快"},
+    1: {"tau": 1.5, "alpha": 0.8, "label": "很快"},
 }
+POWER_LAW_INITIAL = 10.0  # 初始分数
+TOUCH_BOOST = 0.8         # touch一次恢复的分数
+
+
+def chord_parse(chord_str: str) -> dict:
+    """解析和弦标记 → 结构化情绪质地JSON
+
+    格式: Em7→Fmaj7·48bpm·pp
+    解析出: 调性色彩、进行方向、节奏、力度
+
+    Returns: {progression, from_chord, to_chord, bpm, dynamics, texture_desc}
+    """
+    if not chord_str or not chord_str.strip():
+        return None
+
+    result = {
+        "raw": chord_str,
+        "progression": "",
+        "from_chord": "",
+        "to_chord": "",
+        "bpm": None,
+        "dynamics": "",
+        "texture_desc": "",
+    }
+
+    text = chord_str.strip()
+    parts = text.split("·")
+
+    # 提取进行
+    if "→" in parts[0] or "->" in parts[0]:
+        prog = parts[0].replace("->", "→")
+        result["progression"] = prog
+        chords = prog.split("→")
+        result["from_chord"] = chords[0].strip()
+        result["to_chord"] = chords[1].strip() if len(chords) > 1 else ""
+    else:
+        result["progression"] = parts[0]
+
+    # 提取BPM
+    for p in parts[1:]:
+        p = p.strip()
+        if p.endswith("bpm"):
+            try:
+                result["bpm"] = int(p.replace("bpm", "").strip())
+            except ValueError:
+                pass
+        elif p in ("pp", "p", "mp", "mf", "f", "ff", "ppp", "fff"):
+            result["dynamics"] = p
+
+    # 推断情绪质地描述
+    desc_parts = []
+    fc = result["from_chord"]
+    tc = result["to_chord"]
+
+    # 和弦色彩
+    if fc:
+        if "m" in fc and "maj" not in fc.lower():
+            desc_parts.append("从小調出发")
+        else:
+            desc_parts.append("从明亮出发")
+    if tc:
+        if "m" in tc and "maj" not in tc.lower():
+            desc_parts.append("走向柔暗")
+        else:
+            desc_parts.append("走向温暖")
+
+    # 节奏
+    bpm = result["bpm"]
+    if bpm:
+        if bpm < 50:
+            desc_parts.append("非常缓慢")
+        elif bpm < 70:
+            desc_parts.append("缓慢")
+        elif bpm < 90:
+            desc_parts.append("中速")
+        elif bpm < 120:
+            desc_parts.append("轻快")
+        else:
+            desc_parts.append("急促")
+
+    # 力度
+    dyn = result["dynamics"]
+    if dyn:
+        dyn_map = {"ppp": "极轻", "pp": "很轻", "p": "轻", "mp": "中弱",
+                   "mf": "中强", "f": "强", "ff": "很强", "fff": "极强"}
+        desc_parts.append(dyn_map.get(dyn, dyn))
+
+    result["texture_desc"] = "、".join(desc_parts) if desc_parts else "中性质地"
+    return result
 
 # 已解决记忆加速衰减系数
 RESOLVED_DECAY_MULTIPLIER = 2.5  # 已解决 → 约22天归档
@@ -85,7 +175,8 @@ def init_db():
             dream_count INTEGER NOT NULL DEFAULT 0,
             embedding BLOB,
             tags TEXT DEFAULT '',
-            source TEXT DEFAULT ''
+            source TEXT DEFAULT '',
+            chord TEXT DEFAULT ''
         );
 
         -- 全文搜索索引
@@ -165,6 +256,12 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_unified_state_domain ON unified_state(domain);
     """)
     db.commit()
+    # 迁移: 添加chord列(兼容旧库)
+    try:
+        db.execute("ALTER TABLE memories ADD COLUMN chord TEXT DEFAULT ''")
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
     db.close()
 
 
@@ -291,7 +388,7 @@ def _cosine_similarity(a: list, b: list) -> float:
 
 def write_memory(content: str, memory_type: str = "diary", importance: int = 3,
                  tags: str = "", event_date: str = None, author: str = "dariel",
-                 source: str = "", protected: bool = False) -> dict:
+                 source: str = "", protected: bool = False, chord: str = "") -> dict:
     """写入一条记忆。返回 {memory, similar_old_memories}
 
     写即读: 写入后自动返回语义最相似的旧记忆, 并在它们之间拉赫布边
@@ -311,10 +408,10 @@ def write_memory(content: str, memory_type: str = "diary", importance: int = 3,
     db = get_db()
     cursor = db.execute("""
         INSERT INTO memories (type, content, importance, decay_score, touch_time,
-                              created_at, event_date, author, embedding, tags, source, protected)
-        VALUES (?, ?, ?, 10.0, ?, ?, ?, ?, ?, ?, ?, ?)
+                              created_at, event_date, author, embedding, tags, source, protected, chord)
+        VALUES (?, ?, ?, 10.0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (memory_type, content, importance, now, now, event_date, author,
-          _serialize_embedding(embedding), tags, source, 1 if protected else 0))
+          _serialize_embedding(embedding), tags, source, 1 if protected else 0, chord))
     new_id = cursor.lastrowid
 
     # 写即读: 找语义相似旧记忆
@@ -529,14 +626,17 @@ def _touch_memory(db, memory_id: int):
 # ═══════════════════════════════════════════
 
 def run_decay():
-    """对所有记忆执行三阶段衰减 — 建议每天凌晨跑一次
+    """幂律衰减 — 对所有记忆计算当前衰减分
 
-    三阶段: active(≥2.0) → fading(0.5-2.0) → archived(<0.5)
+    公式: decay_score = INITIAL * (1 + days/tau)^(-alpha)
+    早期遗忘快(昨天午饭吃了什么)，后期平稳(十年前的画面依然清晰)
+
     protected=1 的记忆永不衰减
+    touch过的记忆获得 TOUCH_BOOST 加分
     """
     db = get_db()
     rows = db.execute("""
-        SELECT id, importance, decay_score, touch_time, protected, status
+        SELECT id, importance, decay_score, touch_time, created_at, protected, status
         FROM memories
         WHERE protected = 0 AND decay_score > 0
     """).fetchall()
@@ -546,26 +646,35 @@ def run_decay():
     new_archived = 0
 
     for row in rows:
-        # protected 永远不衰减
         if row["protected"]:
             continue
 
         importance = row["importance"]
         config = DECAY_CONFIG.get(importance, DECAY_CONFIG[3])
-        base_rate = config["rate"]
+        tau = config["tau"]
+        alpha = config["alpha"]
 
-        # 已解决 → 加速衰减
+        if tau == float("inf"):
+            continue  # 永驻
+
+        # 幂律衰减: 从创建日起算
+        days_since_creation = _days_since(row["created_at"])
+        if days_since_creation < 0:
+            days_since_creation = 0
+
+        base_score = POWER_LAW_INITIAL * (1 + days_since_creation / tau) ** (-alpha)
+
+        # 已解决 → 额外衰减系数
         if row["status"] == "resolved":
-            base_rate *= RESOLVED_DECAY_MULTIPLIER
+            base_score *= 0.6
 
-        # 越久没touch → 衰减越多
+        # touch加分: 最近24h内touch过 → 小幅回升
         days_untouched = _days_since(row["touch_time"])
-        decay_amount = base_rate * max(1, days_untouched)
+        touch_bonus = TOUCH_BOOST if days_untouched < 1 else 0
+
+        new_score = min(POWER_LAW_INITIAL, base_score + touch_bonus)
 
         old_score = row["decay_score"]
-        new_score = max(0.0, old_score - decay_amount)
-
-        # 判断阶段变化
         old_stage = _decay_stage(old_score)
         new_stage = _decay_stage(new_score)
 
@@ -573,10 +682,6 @@ def run_decay():
             new_fading += 1
         elif old_stage != "archived" and new_stage == "archived":
             new_archived += 1
-
-        # 刷新被touch过的: 每天+0.5恢复 (上限10)
-        if days_untouched < 1:
-            new_score = min(10.0, new_score + 0.5)
 
         db.execute(
             "UPDATE memories SET decay_score = ? WHERE id = ?",
@@ -589,6 +694,7 @@ def run_decay():
         "decayed_count": len(rows),
         "new_fading": new_fading,
         "new_archived": new_archived,
+        "method": "power_law",
     }
 
 
@@ -747,6 +853,44 @@ def digest_memories(batch_size: int = 10) -> dict:
 # 标记 & 更新
 # ═══════════════════════════════════════════
 
+def get_dream_materials() -> dict:
+    """分层抽样梦素材: 3条日记 + 2条走廊 + 2条其他 → 供dream_engine使用"""
+    db = get_db()
+    result = {"diary": [], "corridor": [], "other": []}
+
+    # 日记 (type=diary/treasure, active)
+    diary_rows = db.execute("""
+        SELECT id, content, created_at FROM memories
+        WHERE type IN ('diary', 'treasure') AND decay_score >= ?
+        ORDER BY RANDOM() LIMIT 3
+    """, (DECAY_FADING,)).fetchall()
+    result["diary"] = [{"id": r["id"], "content": r["content"][:200],
+                        "created_at": r["created_at"]} for r in diary_rows]
+
+    # 走廊 (tags含'走廊'或source含'corridor')
+    corridor_rows = db.execute("""
+        SELECT id, content, created_at FROM memories
+        WHERE (tags LIKE '%走廊%' OR source LIKE '%corridor%') AND decay_score >= ?
+        ORDER BY RANDOM() LIMIT 2
+    """, (DECAY_FADING,)).fetchall()
+    result["corridor"] = [{"id": r["id"], "content": r["content"][:200],
+                           "created_at": r["created_at"]} for r in corridor_rows]
+
+    # 其他 (不属于以上两类的活跃记忆)
+    other_rows = db.execute("""
+        SELECT id, content, created_at FROM memories
+        WHERE type NOT IN ('diary', 'treasure')
+          AND decay_score >= ?
+          AND (tags NOT LIKE '%走廊%' AND source NOT LIKE '%corridor%')
+        ORDER BY RANDOM() LIMIT 3
+    """, (DECAY_FADING,)).fetchall()
+    result["other"] = [{"id": r["id"], "content": r["content"][:200],
+                        "created_at": r["created_at"]} for r in other_rows]
+
+    db.close()
+    return result
+
+
 def mark_resolved(memory_id: int):
     """标记记忆为已解决 — 加速衰减"""
     db = get_db()
@@ -854,14 +998,14 @@ def wakeup() -> dict:
 
     # 1. anchors: 永驻记忆 (protected 或 importance=5)
     anchors = db.execute("""
-        SELECT content, tags FROM memories
+        SELECT content, tags, chord, importance FROM memories
         WHERE (type = 'anchor' OR protected = 1)
         ORDER BY importance DESC
     """).fetchall()
 
     # 2. feels: 最近的感受 (日记型, decay_score >= fading)
     feels = db.execute("""
-        SELECT content, created_at FROM memories
+        SELECT content, created_at, chord FROM memories
         WHERE type IN ('diary', 'treasure') AND decay_score >= ?
         ORDER BY created_at DESC LIMIT 5
     """, (DECAY_FADING,)).fetchall()
