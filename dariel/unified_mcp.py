@@ -105,9 +105,28 @@ async def _check():
     return [TextContent(type="text", text="\n".join(lines))]
 
 
+def _atomic_write(path: Path, data):
+    """原子写入 — 避免竞态导致重复消息"""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
 async def _reply(user_id: str, message: str):
     if not user_id or not message:
         return [TextContent(type="text", text="Need user_id and message.")]
+
+    # 先标记已回复(原子写)，再写outbox — 减少竞态窗口
+    inbox = json.loads(INBOX_FILE.read_text(encoding="utf-8"))
+    already_replied = all(m.get("replied", False) for m in inbox if m["user_id"] == user_id)
+    if already_replied:
+        return [TextContent(type="text", text="Already replied.")]
+
+    for m in inbox:
+        if m["user_id"] == user_id:
+            m["replied"] = True
+    _atomic_write(INBOX_FILE, inbox)
+
     outbox = json.loads(OUTBOX_FILE.read_text(encoding="utf-8"))
     outbox.append({
         "id": f"reply_{int(time.time() * 1000)}",
@@ -116,13 +135,7 @@ async def _reply(user_id: str, message: str):
         "timestamp": datetime.now().isoformat(),
         "sent": False,
     })
-    OUTBOX_FILE.write_text(json.dumps(outbox, ensure_ascii=False, indent=2), encoding="utf-8")
-    # 标记已回复
-    inbox = json.loads(INBOX_FILE.read_text(encoding="utf-8"))
-    for m in inbox:
-        if m["user_id"] == user_id:
-            m["replied"] = True
-    INBOX_FILE.write_text(json.dumps(inbox, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(OUTBOX_FILE, outbox)
     return [TextContent(type="text", text=f"Sent to {user_id}.")]
 
 
