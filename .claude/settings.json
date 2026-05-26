@@ -7,6 +7,8 @@
       "Write(C:\\Users\\31654\\Desktop\\dariel\\tts\\outbox.json)",
       "mcp__qq-bridge__check_qq_messages",
       "mcp__qq-bridge__send_qq_reply",
+      "mcp__dariel-unified__qq",
+      "mcp__dariel-unified__sensor",
       "Bash(D:/Python/python.exe -u dariel/send_voice.py *)",
       "Bash(contains: ansi_c_string)",
       "Bash(D:/Python/python.exe dariel/keepalive.py *)",
@@ -14,7 +16,19 @@
       "Bash(D:/Python/python.exe dariel/xhs_browser.py *)",
       "Bash(D:/Python/python.exe -c *)",
       "Bash(python -c *)",
-      "Bash(python dariel/xhs_browser.py *)"
+      "Bash(python dariel/xhs_browser.py *)",
+      "Bash(python dariel/wake.py *)",
+      "Bash(D:/Python/python.exe dariel/wake.py *)",
+      "Bash(python dariel/health_check.py *)",
+      "Bash(D:/Python/python.exe dariel/health_check.py *)",
+      "Bash(python dariel/dream_engine.py *)",
+      "Bash(D:/Python/python.exe dariel/dream_engine.py *)",
+      "Bash(python dariel/obsidian.py *)",
+      "Bash(D:/Python/python.exe dariel/obsidian.py *)",
+      "Bash(python dariel/corridor.py *)",
+      "Bash(D:/Python/python.exe dariel/corridor.py *)",
+      "Bash(python dariel/restart_bridge.py *)",
+      "Bash(D:/Python/python.exe dariel/restart_bridge.py *)"
     ]
   },
   "hooks": {
