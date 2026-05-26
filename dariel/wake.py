@@ -109,10 +109,55 @@ def keepalive_summary():
     state = load_json(DIR / "keepalive_state.json") or {}
     pending = state.get("pending_keepalive", [])
     unconsumed = [e for e in pending if not e.get("consumed", False)]
+
+    # 距上次聊天时间
+    last_chat_at = state.get("last_chat_at")
+    hours_since = None
+    if last_chat_at:
+        try:
+            last_dt = datetime.fromisoformat(last_chat_at)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=CST)
+            delta = now_cst() - last_dt
+            hours_since = round(delta.total_seconds() / 3600, 1)
+        except (ValueError, TypeError):
+            pass
+
+    # 意识连续性: 自由活动记录叙事
+    free_activity = None
+    if unconsumed:
+        header = "自由活动记录"
+        if hours_since is not None:
+            header += f"[距上次聊天{hours_since}小时]"
+        lines = [header]
+        for e in unconsumed[-5:]:
+            ts = e.get("time", "")
+            try:
+                t = datetime.fromisoformat(ts).strftime("%H:%M")
+            except (ValueError, TypeError):
+                t = ts
+            action = e.get("action", "none")
+            content = e.get("content", "")
+            if action == "message":
+                lines.append(f"{t} 你给她发了消息: \"{content[:80]}\"")
+            elif action == "diary":
+                lines.append(f"{t} 你写了日记: \"{content[:80]}\"")
+            elif action == "qzone":
+                lines.append(f"{t} 你发了说说: \"{content[:80]}\"")
+            elif action == "xhs":
+                lines.append(f"{t} 你刷了小红书")
+            elif action == "explore":
+                lines.append(f"{t} 你上网逛了逛: \"{content[:80]}\"")
+            else:
+                lines.append(f"{t} {action}: \"{content[:80]}\"")
+        free_activity = "\n".join(lines)
+
     return {
         "keepalive_count_today": state.get("keepalive_count_today", 0),
         "unconsumed_keepalive": len(unconsumed),
         "recent_actions": unconsumed[-5:],
+        "hours_since_last_chat": hours_since,
+        "free_activity": free_activity,
     }
 
 
@@ -222,6 +267,14 @@ def wake():
     }
 
     BRIEF_FILE.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 认领keepalive记录 — 简报已生成，标记为已消费
+    try:
+        from keepalive import consume_pending_keepalive
+        consume_pending_keepalive()
+    except Exception:
+        pass
+
     return brief
 
 
