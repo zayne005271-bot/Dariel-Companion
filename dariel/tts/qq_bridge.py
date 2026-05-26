@@ -12,6 +12,7 @@ import websockets
 BRIDGE_DIR = Path(__file__).parent
 INBOX_FILE = BRIDGE_DIR / "inbox.json"
 OUTBOX_FILE = BRIDGE_DIR / "outbox.json"
+PID_FILE = BRIDGE_DIR / "qq_bridge.pid"
 
 NAP_WS = "ws://localhost:6098"
 NAP_TOKEN = "claude-bridge-token"
@@ -76,6 +77,8 @@ async def flush_outbox(ws):
 
 async def run():
     init_files()
+    # write PID for safe restarts — never kill all python, only kill this PID
+    PID_FILE.write_text(str(os.getpid()))
     log("[bridge] QQ <-> Claude Code bridge started")
     log(f"[bridge] inbox: {INBOX_FILE}")
     log(f"[bridge] outbox: {OUTBOX_FILE}")

@@ -15,11 +15,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    ```bash
    # 启动 NapCat (如未运行)
    docker start napcat
-   # 启动桥接 (如未运行)
-   nohup D:/Python/python.exe -u dariel/tts/qq_bridge.py > /tmp/qq_bridge.log 2>&1 & disown
+   # 安全重启桥接 — 只杀桥接PID，不动其他Python进程
+   python dariel/restart_bridge.py
    ```
-   检查 qq_bridge 进程(不准批量杀): `tasklist /FI "IMAGENAME eq python.exe"`
-   杀进程前必须确认PID对应脚本，只杀目标，不用通配符。
+   **禁止批量杀Python进程。** 桥接PID写入 `dariel/tts/qq_bridge.pid`，用 `restart_bridge.py` 安全重启。
 
 **会话关闭前/每晚安顿前：**
 ```bash
