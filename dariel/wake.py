@@ -185,6 +185,21 @@ def corridor_today():
     return corridor.get("today_summary", {})
 
 
+def health_summary():
+    """服务健康检查摘要 — 轻量版"""
+    try:
+        from health_check import check
+        hc = check(autofix=False)
+        return {
+            "overall": hc["overall"],
+            "napcat": hc.get("napcat", {}).get("ok", False),
+            "qq_bridge": hc.get("qq_bridge", {}).get("ok", False),
+            "mcp": hc.get("mcp", {}).get("ok", False),
+        }
+    except Exception as e:
+        return {"overall": "unknown", "error": str(e)}
+
+
 def wake():
     """生成开窗简报 — 一次调用拿所有上下文"""
     brief = {
@@ -201,6 +216,7 @@ def wake():
         "impulse": impulse_status(),
         "sensor": sensor_summary(),
         "dream": dream_activity(),
+        "health": health_summary(),
         "memory": memory_brief(),
         "boot_tip": "以上是开窗简报。读完你就知道: 我是谁、最近怎么了、有什么待办。记忆库数据来自 memory_core。",
     }
@@ -277,4 +293,5 @@ if __name__ == "__main__":
     else:
         brief = wake()
         print(f"[wake] 开窗简报已生成 — {brief['time']['date']} {brief['time']['weekday']} {brief['time']['time']}")
-        print(f"  待回:{brief['pending']['unreplied_count']} | 冲动:{brief['impulse']['impulse']} | 记忆:{brief['memory'].get('total_memories',0)}条")
+        h = brief.get("health", {})
+        print(f"  健康:{h.get('overall','?')} | 待回:{brief['pending']['unreplied_count']} | 冲动:{brief['impulse']['impulse']} | 记忆:{brief['memory'].get('total_memories',0)}条")

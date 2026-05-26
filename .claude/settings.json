@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(C:\\Users\\31654\\Desktop\\dariel\\tts\\inbox.json)",
+      "Read(C:\\Users\\31654\\Desktop\\dariel\\tts\\outbox.json)",
+      "Write(C:\\Users\\31654\\Desktop\\dariel\\tts\\inbox.json)",
+      "Write(C:\\Users\\31654\\Desktop\\dariel\\tts\\outbox.json)",
+      "mcp__qq-bridge__check_qq_messages",
+      "mcp__qq-bridge__send_qq_reply",
+      "Bash(D:/Python/python.exe -u dariel/send_voice.py *)",
+      "Bash(contains: ansi_c_string)",
+      "Bash(D:/Python/python.exe dariel/keepalive.py *)",
+      "Bash(D:/Python/python.exe -c *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "D:/Python/python.exe .claude/hooks/validate-edit.py ${CLAUDE_TOOL_INPUT_FILE}"
+          },
+          {
+            "type": "command",
+            "command": "D:/Python/python.exe .claude/hooks/log-operation.py ${CLAUDE_TOOL_INPUT_FILE} ${CLAUDE_TOOL_NAME}"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "matcher_file_pattern": ".claude/hooks/validate-edit.py",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "D:/Python/python.exe .claude/hooks/validate-reflection-tests.py"
+          }
+        ]
+      }
+    ]
+  }
+}

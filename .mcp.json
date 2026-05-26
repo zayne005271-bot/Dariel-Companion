@@ -1,10 +1,5 @@
 {
   "mcpServers": {
-    "qq-bridge": {
-      "command": "D:/Python/python.exe",
-      "args": ["-u", "dariel/tts/mcp_server.py"],
-      "cwd": "C:/Users/31654/Desktop"
-    },
     "dariel-unified": {
       "command": "D:/Python/python.exe",
       "args": ["-u", "dariel/unified_mcp.py"],

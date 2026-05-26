@@ -94,9 +94,8 @@ async def run():
                 log("[bridge] connected to NapCat")
                 retry_idx = 0  # reset on success
 
-                # send any pending messages first
+                # poll_outbox handles all sending (avoid dual-send from flush+ poll race)
                 poll_task = asyncio.create_task(poll_outbox(ws))
-                await flush_outbox(ws)
 
                 async for raw_msg in ws:
                     try:
