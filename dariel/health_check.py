@@ -17,10 +17,14 @@ REQUIRED_FILES = [
     DIR / "keepalive.py",
     DIR / "corridor.py",
     DIR / "dream_engine.py",
+    DIR / "dream_events.py",
     DIR / "emotion_engine.py",
     DIR / "impulse_engine.py",
     DIR / "xhs_browser.py",
     DIR / "unified_mcp.py",
+    DIR / "wake.py",
+    DIR / "push_notify.py",
+    DIR / "restart_bridge.py",
     BRIDGE_DIR / "qq_bridge.py",
     BRIDGE_DIR / "mcp_server.py",
 ]
@@ -111,6 +115,20 @@ def check(autofix: bool = False) -> dict:
         results["mcp"] = {"ok": False, "error": str(e)}
         all_ok = False
 
+    # 5b. dream_events server (iOS感知层)
+    import socket
+    dream_port_ok = False
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        dream_port_ok = s.connect_ex(("127.0.0.1", 8765)) == 0
+        s.close()
+    except Exception:
+        pass
+    results["dream_events"] = {"ok": dream_port_ok, "port": 8765}
+    if not dream_port_ok:
+        all_ok = False
+
     # 6. state files
     state_files = [
         "sensor_state.json", "impulse_state.json", "keepalive_state.json",
@@ -163,6 +181,18 @@ def _autofix(results: dict) -> dict:
             fixes.append("napcat started")
         except Exception as e:
             fixes.append(f"napcat start failed: {e}")
+
+    # Start dream_events if not listening
+    if not results.get("dream_events", {}).get("ok"):
+        try:
+            subprocess.Popen(
+                ["D:/Python/python.exe", "-u", str(DIR / "dream_events.py")],
+                stdout=open(str(DIR / "tts" / "dream_events.log"), "a"),
+                stderr=subprocess.STDOUT,
+            )
+            fixes.append("dream_events started")
+        except Exception as e:
+            fixes.append(f"dream_events start failed: {e}")
 
     return fixes
 

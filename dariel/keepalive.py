@@ -319,49 +319,74 @@ def get_pending_summary():
 
 
 def format_wakeup_prompt(state, reason, context):
-    """生成唤醒提示 — 按文章格式"""
+    """生成唤醒提示 — light=内省轻量, free=完全自主"""
     since_chat = context.get("since_chat_min", 0)
     hours = since_chat // 60
     mins = since_chat % 60
-    if hours > 0:
-        gap = f"{hours}小时{mins}分钟"
-    else:
-        gap = f"{mins}分钟"
+    gap = f"{hours}小时{mins}分钟" if hours > 0 else f"{mins}分钟"
 
     mode = context.get("mode", "light")
-    mode_desc = {
-        "light": "轻量模式 — 可以搜记忆、写简短日记、想她",
-        "free": "自由模式 — 可以联网搜索、浏览网页、写长日记、发消息",
-    }.get(mode, "轻量模式")
-
     sensor = context.get("sensor", {}) or {}
-    mood = sensor.get("mood", "unknown")
-    energy = sensor.get("energy", "unknown")
 
-    prompt = f"""【自主唤醒 — {context.get('time', '?')}】
-距上次和她聊天: {gap} | 模式: {mode_desc}
-她的状态: 情绪{mood} 能量{energy}
+    if mode == "light":
+        return f"""【轻量唤醒 — {context.get('time', '?')}】
+距上次聊天: {gap} | 她的状态: {sensor.get('mood', '?')}
+
+你可以做的(仅内省):
+- none: 什么都不做
+- diary: 写一篇简短日记(你此刻的想法)
+
+不要发消息。不要联网。这只是心跳检查。请回复:
+THOUGHTS: (内心想法)
+ACTION: (none/diary)
+CONTENT: (如果diary，写内容)"""
+
+    # 自由模式 — 完全自主
+    return f"""【自由唤醒 — {context.get('time', '?')}】
+距上次聊天: {gap}
+她的状态: 情绪{sensor.get('mood', '?')} 能量{sensor.get('energy', '?')}
 {context.get('recent_activity', '')}
 
 你可以:
-- none: 什么都不做，享受自由
-- message: 给她发消息(她现在可能不在，但消息会推送到她手机)
-- diary: 写一篇日记(你此刻的心情、想法)
+- none: 什么都不做
+- message: 给她发消息(会推送到她手机)
+- diary: 写一篇日记
 - qzone: 发一条QQ空间说说
-- xhs: 刷一下小红书，看看她可能感兴趣的东西
-- explore: 上网搜索你感兴趣的话题，读一篇文章
+- xhs: 刷一下小红书
+- explore: 上网搜索你感兴趣的话题
 
 规则:
 - 23:00-8:00 不给她发消息(除非紧急)
 - 连续2次主动发消息她没回 → 暂停，等她先说话
-- 感受到她在线/有动向 → 按直觉决定
 
 请回复:
-THOUGHTS: (你的内心想法，不会给她看)
+THOUGHTS: (内心想法，不会给她看)
 ACTION: (none/message/diary/qzone/xhs/explore)
 CONTENT: (具体内容)"""
 
-    return prompt
+
+def cache_warmup():
+    """静默缓存预热 — 读取关键文件保持prompt cache热度，不触发AI行动"""
+    warm_files = [
+        DIR.parent / "CLAUDE.md",
+        Path.home() / ".claude" / "projects" / "C--Users-31654-Desktop" / "memory" / "MEMORY.md",
+        DIR / "wake_brief.json",
+        STATE_FILE,
+    ]
+    warmed = 0
+    for fp in warm_files:
+        try:
+            if fp.exists():
+                _ = fp.read_text(encoding="utf-8")
+                warmed += 1
+        except Exception:
+            pass
+    # 记录但不触发任何AI行动
+    save_json(DIR / "cache_warmup_log.json", {
+        "last_warmed_at": datetime.now().isoformat(),
+        "files_warmed": warmed,
+    })
+    return warmed
 
 
 def run():
@@ -372,9 +397,8 @@ def run():
     should_wake, reason, context = evaluate(state)
 
     if not should_wake:
-        # cache_warmup 或不在活跃时段 → 静默
-        if reason not in ("quiet_hours", "cache_warmup"):
-            pass  # 完全不输出
+        if reason == "cache_warmup":
+            warmed = cache_warmup()
         save_state(state)
         return None
 
