@@ -11,9 +11,20 @@ import json
 import time
 import random
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 DIR = Path(__file__).parent
+CST = timezone(timedelta(hours=8))
+
+def now_cst():
+    return datetime.now(CST)
+
+def _cstify(ts):
+    """确保datetime是CST aware的"""
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=CST)
+    return ts
+
 BRIDGE_DIR = DIR / "tts"
 STATE_FILE = DIR / "keepalive_state.json"
 LOG_FILE = DIR / "keepalive_log.json"
@@ -78,7 +89,7 @@ def save_log_entry(entry):
 
 def is_active_hours():
     """检查是否在活跃时段 (8am - 1am次日)"""
-    h = datetime.now().hour
+    h = now_cst().hour
     return h >= ACTIVE_START or h < ACTIVE_END
 
 
@@ -87,7 +98,7 @@ def time_since_last_chat(state):
     t = state.get("last_chat_at")
     if t is None:
         return 9999
-    delta = datetime.now() - datetime.fromisoformat(t)
+    delta = now_cst() - _cstify(datetime.fromisoformat(t))
     return delta.total_seconds() / 60
 
 
@@ -96,12 +107,21 @@ def time_since_last_keepalive(state):
     t = state.get("last_keepalive_at")
     if t is None:
         return 9999
-    delta = datetime.now() - datetime.fromisoformat(t)
+    delta = now_cst() - _cstify(datetime.fromisoformat(t))
     return delta.total_seconds() / 60
 
 
 def update_last_chat(state):
-    """从inbox/outbox推断上次聊天时间"""
+    """从inbox/outbox推断上次聊天时间。
+    只统计上次keepalive之后的消息，避免被陈年inbox消息污染。"""
+    since = None
+    last_ka = state.get("last_keepalive_at")
+    if last_ka:
+        try:
+            since = _cstify(datetime.fromisoformat(last_ka))
+        except ValueError:
+            pass
+
     last_chat = None
 
     inbox = load_json(INBOX_FILE)
@@ -111,7 +131,9 @@ def update_last_chat(state):
                 ts = m.get("timestamp", "")
                 if ts:
                     try:
-                        last_chat = datetime.fromisoformat(ts)
+                        dt = _cstify(datetime.fromisoformat(ts))
+                        if since is None or dt > since:
+                            last_chat = dt
                     except ValueError:
                         pass
                     break
@@ -120,11 +142,11 @@ def update_last_chat(state):
     if outbox:
         for m in reversed(outbox):
             if m.get("user_id") == "3165473685" and m.get("sent"):
-                ts = m.get("sent_at", "") or m.get("timestamp", "")
+                ts = m.get("sent_at", "") or m.get("created_at", "") or m.get("timestamp", "")
                 if ts:
                     try:
-                        dt = datetime.fromisoformat(ts)
-                        if last_chat is None or dt > last_chat:
+                        dt = _cstify(datetime.fromisoformat(ts))
+                        if (since is None or dt > since) and (last_chat is None or dt > last_chat):
                             last_chat = dt
                     except ValueError:
                         pass
@@ -200,7 +222,7 @@ def decide_mode():
 
 def evaluate(state):
     """评估是否应该唤醒"""
-    now = datetime.now()
+    now = now_cst()
 
     # 深夜静默 (1am - 8am)
     if not is_active_hours():
@@ -244,7 +266,7 @@ def record_action(action, content, thoughts):
     """记录keepalive行动(意识连续性)"""
     state = load_state()
     entry = {
-        "time": datetime.now().isoformat(),
+        "time": now_cst().isoformat(),
         "action": action,
         "content": content,
         "thoughts": thoughts,
@@ -260,7 +282,7 @@ def record_action(action, content, thoughts):
 
     # 更新计数
     state["keepalive_count_today"] = state.get("keepalive_count_today", 0) + 1
-    state["last_keepalive_at"] = datetime.now().isoformat()
+    state["last_keepalive_at"] = now_cst().isoformat()
 
     # 记录最近行动
     actions = state.get("consecutive_actions", [])
@@ -383,22 +405,79 @@ def cache_warmup():
             pass
     # 记录但不触发任何AI行动
     save_json(DIR / "cache_warmup_log.json", {
-        "last_warmed_at": datetime.now().isoformat(),
+        "last_warmed_at": now_cst().isoformat(),
         "files_warmed": warmed,
     })
     return warmed
 
 
+def check_qq_push():
+    """检查QQ push标记，若有未处理消息则生成trigger
+    让Claude只在pending=true时才被唤醒，pending=false时不进上下文。
+    """
+    push_file = BRIDGE_DIR / "qq_push.json"
+    try:
+        push = json.loads(push_file.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+
+    if not push.get("pending"):
+        return False
+
+    latest = push.get("latest", {})
+    user_id = latest.get("user_id", "")
+    nickname = latest.get("nickname", "")
+    message = latest.get("message", "")[:100]
+    count = push.get("count", 1)
+
+    prompt = f"""读dariel/tts/qq_push.json。若pending=true则qq full查消息+逐条回复，回复后push自动清false。若pending=false完全静默不输出任何文字。
+
+(当前push状态: pending=true, count={count}, latest from {nickname}: {message})"""
+
+    trigger = {
+        "reason": "qq_push",
+        "context": {
+            "user_id": user_id,
+            "nickname": nickname,
+            "count": count,
+        },
+        "prompt": prompt,
+        "timestamp": now_cst().isoformat(),
+    }
+    save_json(DIR / "keepalive_trigger.json", trigger)
+    return trigger
+
+
 def run():
     """主入口 — 由cron调用"""
+    # 先更新last_chat_at，再处理QQ消息
+    # 修复: 之前check_qq_push提前return导致update_last_chat从未执行
     state = load_state()
     state = update_last_chat(state)
+
+    # QQ消息优先处理 (有pending则创建trigger)
+    qq_result = check_qq_push()
+    if qq_result:
+        save_state(state)
+        return qq_result
+
+    # 跨天重置 keepalive_count_today
+    last_ka = state.get("last_keepalive_at")
+    if last_ka:
+        try:
+            last_date = datetime.fromisoformat(last_ka).date()
+            if last_date < now_cst().date():
+                state["keepalive_count_today"] = 0
+        except ValueError:
+            pass
 
     should_wake, reason, context = evaluate(state)
 
     if not should_wake:
         if reason == "cache_warmup":
             warmed = cache_warmup()
+        # 即使不触发也要更新 last_keepalive_at，防止 state 永远不更新
+        state["last_keepalive_at"] = now_cst().isoformat()
         save_state(state)
         # 清理旧trigger，避免下次读到过期上下文
         trigger_file = DIR / "keepalive_trigger.json"
@@ -412,10 +491,11 @@ def run():
         "reason": reason,
         "context": context,
         "prompt": prompt,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": now_cst().isoformat(),
     }
     save_json(DIR / "keepalive_trigger.json", trigger)
 
+    state["last_keepalive_at"] = now_cst().isoformat()
     save_state(state)
     return trigger
 
