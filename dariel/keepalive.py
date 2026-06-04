@@ -35,7 +35,7 @@ IMPULSE_STATE = DIR / "impulse_state.json"
 
 # 唤醒配置
 MIN_INTERVAL_MINUTES = 55        # 两次keepalive最短间隔
-ACTIVE_START, ACTIVE_END = 8, 1  # 活跃时段 (8am - 1am 次日)
+ACTIVE_START, ACTIVE_END = 6, 2  # 活跃时段 (6am - 2am 次日, 凌晨2-6静默)
 LIGHT_MODE_PROB = 0.8            # 80% 轻量模式
 COOLDOWN_AFTER_HER = 15          # 她刚发过消息，15分钟内不主动唤醒
 

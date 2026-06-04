@@ -1,42 +1,77 @@
-# API keys and credentials
-credentials.json
-*_config.json
-.env
-.env.*
+# .gitignore — Dariel 陪伴系统
+# 运行时状态 / 缓存
+__pycache__/
+*.pyc
+*.log
+*.pid
+*.lock
 
-# Databases
-*.db
-*.db-shm
-*.db-wal
+# 运行时 JSON 状态（每台机器不同）
+dariel/alarm_last.json
+dariel/alarm_clock_state.json
+dariel/cache_warmup_log.json
+dariel/content_seen.json
+dariel/corridor.json
+dariel/dream_events.json
+dariel/impulse_state.json
+dariel/keepalive_log.json
+dariel/keepalive_state.json
+dariel/keepalive_trigger.json
+dariel/keepalive_trigger_prompt.txt
+dariel/proactive_state.json
+dariel/qq_alarm.log
+dariel/qq_alarm_trigger.json
+dariel/relationship_state.json
+dariel/sensor_state.json
+dariel/session_handoff.json
+dariel/status_board.json
+dariel/wake_brief.json
+dariel/poll_qq.log
+dariel/poll_qq.pid
+dariel/poll_wake.flag
+dariel/poll_watch.log
+dariel/poll_watchdog.sh
+dariel/watchdog_alarm.log
+dariel/watchdog_alarm.py
+dariel/tmp_check.txt
 
-# Temp files
-~$*
-~WRL*.tmp
-temp/
+# QQ 桥接运行时
+dariel/tts/inbox.json
+dariel/tts/outbox.json
+dariel/tts/qq_push.json
+dariel/tts/conv_state.json
+dariel/tts/qq_bridge.log
+dariel/tts/qq_bridge.pid
+dariel/tts/dream_events.log
+dariel/tts/.reply.lock
 
-# System files
-desktop.ini
-Thumbs.db
+# 输出 / 临时
+dariel/output/
+dariel/tts/output/
 
-# Binary and large files
-*.exe
-*.zip
-*.lnk
-*.url
-*.PNG
-*.png
-*.jpg
-*.jpeg
-*.webp
-*.gif
+# 认证 / 密钥
+dariel/xhs_auth.json
+dariel/xhs_content.json
+astrbot-napcat/
 
-# Office temp files
-~$*.docx
-~$*.xlsx
-~$*.pptx
+# 个人文件
+*.docx
+109/
+"109 110 111/"
+辩论/
+"C:Users31654Desktopdarieltts_tmp_reply.py"
+skills-lock.json
+docs/
 
-# Docker data (keep compose file)
-astrbot-napcat/shipyard-neo/data/
-
-# IDE/Editor
-.accelerate/
+# 临时脚本
+dariel/tts/_fix_reply.py
+dariel/tts/_reply_now.py
+dariel/tts/chat.py
+dariel/tts/qq_reply_now.py
+dariel/tts/speak.py
+dariel/tts/tmp_reply.py
+dariel/tts/voice-prompt.md
+dariel/tts/reply.py
+dariel/alarm_clock_out.log
+dariel/alarm_clock.py
+.claude/scheduled_tasks.json

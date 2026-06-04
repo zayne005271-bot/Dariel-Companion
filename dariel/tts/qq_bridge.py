@@ -9,10 +9,16 @@ from datetime import datetime
 
 import websockets
 
+# 导入keepalive的update_last_chat，收消息时实时更新心跳状态
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from keepalive import update_last_chat, load_state, save_state as keepalive_save_state
+
 BRIDGE_DIR = Path(__file__).parent
 INBOX_FILE = BRIDGE_DIR / "inbox.json"
 OUTBOX_FILE = BRIDGE_DIR / "outbox.json"
 PID_FILE = BRIDGE_DIR / "qq_bridge.pid"
+PUSH_FILE = BRIDGE_DIR / "qq_push.json"  # 方案三: push标记，避免轮询烧上下文
 
 NAP_WS = "ws://localhost:6098"
 NAP_TOKEN = "claude-bridge-token"
@@ -47,12 +53,41 @@ def write_messages(path: Path, data: list[dict]):
     tmp.replace(path)
 
 
+def push_notify(user_id: str, nickname: str, message: str):
+    """方案三: 写push标记文件，让Claude在被唤醒时直接感知新消息，
+    无需每3分钟轮询inbox.json烧上下文。"""
+    push_data = {
+        "pending": True,
+        "count": 1,  # 会被累计
+        "latest": {
+            "user_id": user_id,
+            "nickname": nickname,
+            "message": message[:200],
+            "at": datetime.now().isoformat(),
+        },
+    }
+    # 如果已有未消费的push，累加count
+    try:
+        existing = json.loads(PUSH_FILE.read_text(encoding="utf-8"))
+        if existing.get("pending"):
+            push_data["count"] = existing.get("count", 0) + 1
+            # 保留更早的latest? 不，用最新的
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    tmp = PUSH_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(push_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(PUSH_FILE)
+    log(f"[push] flag written for {nickname}({user_id}), count={push_data['count']}")
+
+
 async def send_private_msg(ws, user_id: str, message: str):
     payload = {
         "action": "send_private_msg",
         "params": {"user_id": int(user_id), "message": message},
     }
-    await ws.send(json.dumps(payload, ensure_ascii=False))
+    # ensure_ascii=True：中文转\uXXXX，避开WebSocket编码碎裂
+    await ws.send(json.dumps(payload, ensure_ascii=True))
     log(f"[send] -> QQ {user_id}: {message[:60]}...")
 
 
@@ -132,6 +167,17 @@ async def run():
                             inbox = inbox[-100:]
                         write_messages(INBOX_FILE, inbox)
                         log(f"[bridge] -> inbox")
+
+                        # 思思的消息 → push标记 (由*/3轮询任务消费)
+                        if user_id == "3165473685":
+                            push_notify(user_id, nickname, message)
+                            # 实时更新last_chat_at，修复心跳状态滞后bug
+                            try:
+                                st = load_state()
+                                st = update_last_chat(st)
+                                keepalive_save_state(st)
+                            except Exception:
+                                pass  # 不影响主流程
 
                 poll_task.cancel()
                 try:

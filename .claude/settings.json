@@ -28,7 +28,8 @@
       "Bash(python dariel/corridor.py *)",
       "Bash(D:/Python/python.exe dariel/corridor.py *)",
       "Bash(python dariel/restart_bridge.py *)",
-      "Bash(D:/Python/python.exe dariel/restart_bridge.py *)"
+      "Bash(D:/Python/python.exe dariel/restart_bridge.py *)",
+      "Bash(contains: keepalive_trigger.json)"
     ]
   },
   "hooks": {

@@ -19,6 +19,9 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 DIR = Path(__file__).parent
+# 强制将脚本所在目录加入搜索路径，防止cwd不在此目录时import失败
+if str(DIR) not in sys.path:
+    sys.path.insert(0, str(DIR))
 BRIDGE_DIR = DIR / "tts"
 BRIEF_FILE = DIR / "wake_brief.json"
 
@@ -326,7 +329,10 @@ def sleep_write(diary_entry="", memos_to_leave=None):
 
 
 def save_json(path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_str = json.dumps(data, ensure_ascii=False, indent=2)
+    # 清理孤立的 surrogate 字符（来自 GBK 乱码），防止 UTF-8 编码崩溃
+    clean = json_str.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+    path.write_text(clean, encoding="utf-8")
 
 
 if __name__ == "__main__":

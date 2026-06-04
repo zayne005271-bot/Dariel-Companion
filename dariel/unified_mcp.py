@@ -23,6 +23,7 @@ BRIDGE_DIR = DIR / "tts"
 INBOX_FILE = BRIDGE_DIR / "inbox.json"
 OUTBOX_FILE = BRIDGE_DIR / "outbox.json"
 SENSOR_STATE = DIR / "sensor_state.json"
+PUSH_FILE = BRIDGE_DIR / "qq_push.json"  # 方案三: push标记
 
 server = Server("dariel-unified")
 
@@ -66,16 +67,30 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
         elif action == "qzone":
             return await _qzone(args.get("content", ""))
         elif action == "full":
-            # 先查再回
+            # 先查再回: 有user_id+message时一并发送回复
             check_result = await _check_raw()
             if not check_result:
-                return [TextContent(type="text", text="No new messages.")]
-            replies = []
+                # 方案三: 无未回消息时清push标记，防止僵死(竞态/旧MCP未清)
+                try:
+                    PUSH_FILE.write_text('{"pending": false, "count": 0}', encoding="utf-8")
+                except Exception:
+                    pass
+                return [TextContent(type="text", text="·")]
+
+            lines = []
             for msg in check_result:
-                replies.append(
+                lines.append(
                     f"[{msg['id']}] {msg['nickname']}({msg['user_id']}): {msg['message']}"
                 )
-            return [TextContent(type="text", text="\n".join(replies))]
+
+            # 提供了user_id+message则同时发送回复 (之前漏掉了这一步)
+            user_id = args.get("user_id", "")
+            message = args.get("message", "")
+            if user_id and message:
+                reply_result = await _reply(user_id, message)
+                lines.append(f"\n>> sent: {reply_result[0].text}")
+
+            return [TextContent(type="text", text="\n".join(lines))]
         else:
             return [TextContent(type="text", text=f"Unknown action: {action}")]
 
@@ -98,7 +113,7 @@ async def _check_raw():
 async def _check():
     new_msgs = await _check_raw()
     if not new_msgs:
-        return [TextContent(type="text", text="No new messages.")]
+        return [TextContent(type="text", text="·")]
     lines = []
     for m in new_msgs:
         lines.append(f"[{m['id']}] {m['nickname']}({m['user_id']}): {m['message']}")
@@ -112,26 +127,73 @@ def _atomic_write(path: Path, data):
     tmp.replace(path)
 
 
+import threading
+_LOCK_FILE = DIR / "tts" / ".reply.lock"
+_lock = threading.Lock()
+
+
+def _acquire_lock(timeout=5):
+    """文件锁，防止多进程竞态"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            _LOCK_FILE.touch(exist_ok=False)
+            return True
+        except FileExistsError:
+            time.sleep(0.05)
+    return False
+
+
+def _release_lock():
+    try:
+        _LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 async def _reply(user_id: str, message: str):
     if not user_id or not message:
         return [TextContent(type="text", text="Need user_id and message.")]
 
-    # 只标记确实未回复的消息，不阻止后续追加回复
-    inbox = json.loads(INBOX_FILE.read_text(encoding="utf-8"))
-    for m in inbox:
-        if m["user_id"] == user_id and not m.get("replied", False):
-            m["replied"] = True
-    _atomic_write(INBOX_FILE, inbox)
+    # 修复 \n 被 MCP 协议双重转义的问题：把字面 \\n 还原为真正的换行
+    message = message.replace("\\n", "\n")
 
-    outbox = json.loads(OUTBOX_FILE.read_text(encoding="utf-8"))
-    outbox.append({
-        "id": f"reply_{int(time.time() * 1000)}",
-        "user_id": user_id,
-        "message": message,
-        "timestamp": datetime.now().isoformat(),
-        "sent": False,
-    })
-    _atomic_write(OUTBOX_FILE, outbox)
+    if not _acquire_lock():
+        return [TextContent(type="text", text="Lock timeout — another reply in progress")]
+
+    try:
+        # 只标记确实未回复的消息
+        inbox = json.loads(INBOX_FILE.read_text(encoding="utf-8"))
+        unreplied_count = 0
+        for m in inbox:
+            if m["user_id"] == user_id and not m.get("replied", False):
+                m["replied"] = True
+                unreplied_count += 1
+
+        if unreplied_count == 0:
+            _release_lock()
+            return [TextContent(type="text", text="Already replied (dedup)")]
+
+        _atomic_write(INBOX_FILE, inbox)
+
+        outbox = json.loads(OUTBOX_FILE.read_text(encoding="utf-8"))
+        outbox.append({
+            "id": f"reply_{int(time.time() * 1000)}",
+            "user_id": user_id,
+            "message": message,
+            "timestamp": datetime.now().isoformat(),
+            "sent": False,
+        })
+        _atomic_write(OUTBOX_FILE, outbox)
+    finally:
+        _release_lock()
+
+    # 方案三: 回复后清除push标记 (消息已消费)
+    try:
+        PUSH_FILE.write_text('{"pending": false, "count": 0}', encoding="utf-8")
+    except Exception:
+        pass
+
     return [TextContent(type="text", text=f"Sent to {user_id}.")]
 
 

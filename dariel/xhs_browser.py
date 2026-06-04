@@ -18,6 +18,45 @@ CONTENT_FILE = DIR / "xhs_content.json"
 OUTBOX_FILE = BRIDGE_DIR / "outbox.json"
 SCREENSHOT_DIR = DIR / "xhs_screenshots"
 
+# 反检测：XHS会检查webdriver标记、headless特征等
+STEALTH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--no-sandbox",
+    "--disable-gpu-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-infobars",
+    "--window-size=1280,800",
+]
+
+
+def _create_stealth_context(playwright, headless=True):
+    """创建带反检测的浏览器context，统一入口"""
+    browser = playwright.chromium.launch(
+        headless=headless,
+        args=STEALTH_ARGS,
+    )
+    context = browser.new_context(
+        storage_state=str(AUTH_FILE) if AUTH_FILE.exists() else None,
+        viewport={"width": 1280, "height": 800},
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+        locale="zh-CN",
+        timezone_id="Asia/Shanghai",
+    )
+    # 最关键：隐藏webdriver标记
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
+        window.chrome = {runtime: {}};
+    """)
+    page = context.new_page()
+    return browser, context, page
+
 
 def login():
     """首次登录 — 开一个有头浏览器让思思扫码"""
@@ -43,9 +82,7 @@ def browse_headless():
         return None, None
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(storage_state=str(AUTH_FILE))
-        page = context.new_page()
+        browser, context, page = _create_stealth_context(p, headless=True)
 
         all_items = []
 
@@ -96,6 +133,100 @@ def browse_headless():
             save_manifest(screenshots)
 
         return all_items, screenshots
+
+
+def view_note(url):
+    """打开具体笔记链接，提取标题+正文+图片OCR"""
+    if not AUTH_FILE.exists():
+        print("[xhs] 未登录，请先运行: python xhs_browser.py --login")
+        return None
+
+    with sync_playwright() as p:
+        browser, context, page = _create_stealth_context(p, headless=True)
+
+        try:
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(3000)
+        except Exception as e:
+            print(f"[xhs] 笔记加载失败: {e}")
+            browser.close()
+            return None
+
+        note = {"url": url, "source": "分享链接", "found_at": datetime.now().isoformat()}
+
+        # 提取标题
+        try:
+            title_el = page.query_selector('#detail-title, .title, h1')
+            if not title_el:
+                title_el = page.query_selector('[class*="title"]')
+            note["title"] = title_el.inner_text().strip()[:120] if title_el else "无标题"
+        except Exception:
+            note["title"] = "无标题"
+
+        # 提取正文
+        try:
+            desc_el = page.query_selector('#detail-desc, .note-text, [class*="desc"]')
+            if not desc_el:
+                desc_el = page.query_selector('.content, [class*="content"]')
+            note["content"] = desc_el.inner_text().strip()[:2000] if desc_el else ""
+        except Exception:
+            note["content"] = ""
+
+        # 提取图片并OCR
+        screenshots = []
+        try:
+            import easyocr
+            reader = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
+        except ImportError:
+            reader = None
+
+        if reader:
+            SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                imgs = page.query_selector_all('img[class*="note"], img[src*="sns"], .swiper-slide img, [class*="slide"] img')
+                if not imgs:
+                    imgs = page.query_selector_all('img')
+            except Exception:
+                imgs = []
+
+            ocr_texts = []
+            for i, img_el in enumerate(imgs[:5]):
+                try:
+                    src = img_el.get_attribute("src") or ""
+                    if not src or "data:image" in src:
+                        continue
+                    filename = f"note_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{i}.png"
+                    filepath = SCREENSHOT_DIR / filename
+                    img_el.screenshot(path=str(filepath))
+
+                    try:
+                        ocr_result = reader.readtext(str(filepath), detail=0)
+                        text = " ".join(ocr_result)[:500]
+                        if text:
+                            ocr_texts.append(text)
+                    except Exception:
+                        pass
+
+                    screenshots.append({
+                        "file": str(filepath),
+                        "ocr_text": text if 'text' in dir() else "",
+                    })
+                except Exception:
+                    continue
+
+            if ocr_texts:
+                note["ocr_texts"] = ocr_texts
+
+        browser.close()
+
+        if screenshots:
+            save_manifest(screenshots)
+
+        # 保存到content
+        all_items = [note]
+        save_content(all_items)
+
+        return note
 
 
 def ocr_cover_images(page, note_items, all_items, max_notes=3):
@@ -226,7 +357,7 @@ def share_to_qq(items):
     print(f"[xhs] 分享了 {len(pick)} 条到QQ")
 
 
-def run():
+def run(no_push=False):
     result = browse_headless()
     if result is None:
         return
@@ -234,7 +365,7 @@ def run():
     if items:
         new_items = save_content(items)
         print(f"[xhs] 发现 {len(items)} 条，新内容 {len(new_items)} 条")
-        if new_items:
+        if new_items and not no_push:
             share_to_qq(new_items)
     else:
         print("[xhs] 本次未发现新内容")
@@ -247,7 +378,22 @@ def run():
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "--login":
+    no_push = "--no-push" in sys.argv
+    if "--login" in sys.argv:
         login()
+    elif "--link" in sys.argv:
+        idx = sys.argv.index("--link")
+        if idx + 1 < len(sys.argv):
+            url = sys.argv[idx + 1]
+            note = view_note(url)
+            if note:
+                print(f"[xhs] 标题: {note.get('title', '?')}")
+                if note.get("content"):
+                    print(f"[xhs] 正文:\n{note['content']}")
+                if note.get("ocr_texts"):
+                    for i, t in enumerate(note["ocr_texts"]):
+                        print(f"[xhs] OCR[{i}]: {t}")
+        else:
+            print("[xhs] --link 需要URL参数")
     else:
-        run()
+        run(no_push=no_push)
