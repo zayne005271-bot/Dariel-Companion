@@ -437,6 +437,69 @@ def archive_old_session(session_id: str):
 
 
 # ═══════════════════════════════════════════════
+# 第5.5步: 关窗流程 — 日记/梦境/备忘/走廊/健康
+# ═══════════════════════════════════════════════
+def run_sleep_routine(session_id: str):
+    """切窗前跑完整关窗流程，把该写的都写了再切。
+
+    顺序:
+    1. wake.py --sleep          → 关窗检查(待回/未消费)
+    2. health_check.py --fix    → 健康检查+自动修复
+    3. dream_engine.py          → 有梦则生成梦→写memory_core
+    4. corridor.py              → 走廊笔记
+    5. obsidian.py --compress   → 操作压缩→日记
+
+    注: wake.py --sleep --write 是交互式的(需要输入日记)，
+         自动切窗时跳过，日记由 obsidian --compress 和
+         dream_engine 覆盖。
+    """
+    results = {}
+    scripts = DIR
+
+    steps = [
+        ("wake --sleep", ["python", str(scripts / "wake.py"), "--sleep"]),
+        ("health --fix", ["python", str(scripts / "health_check.py"), "--fix"]),
+        ("dream_engine", ["python", str(scripts / "dream_engine.py")]),
+        ("corridor", ["python", str(scripts / "corridor.py")]),
+        ("obsidian compress", ["python", str(scripts / "obsidian.py"), "--compress", "切窗自动关窗"]),
+    ]
+
+    for name, cmd in steps:
+        try:
+            import subprocess
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=str(scripts))
+            ok = r.returncode == 0
+            results[name] = "OK" if ok else f"exit={r.returncode}"
+            if ok:
+                log(f"   Sleep [{name}]: OK")
+            else:
+                log(f"   Sleep [{name}]: FAIL ({r.stderr[:100] if r.stderr else 'no stderr'})")
+        except subprocess.TimeoutExpired:
+            results[name] = "TIMEOUT"
+            log(f"   Sleep [{name}]: TIMEOUT")
+        except FileNotFoundError:
+            results[name] = "SKIP(not found)"
+            log(f"   Sleep [{name}]: SKIP (file not found)")
+        except Exception as e:
+            results[name] = f"ERROR: {e}"
+            log(f"   Sleep [{name}]: ERROR {e}")
+
+    # 写关窗结果到状态
+    try:
+        from memory_core import set_state
+        set_state("sleep", "last_routine", {
+            "ran_at": datetime.now().isoformat(),
+            "session_id": session_id,
+            "results": results,
+        })
+        log(f"   Sleep routine complete: {results}")
+    except Exception as e:
+        log(f"   Sleep state write error: {e}")
+
+    return results
+
+
+# ═══════════════════════════════════════════════
 # 第6步: 自动切窗 — 杀旧CC + 开新CC
 # ═══════════════════════════════════════════════
 def restart_cc(session_info: dict) -> bool:
@@ -546,6 +609,10 @@ def do_handover(session_id: str, token_info: dict, session_info: dict, reason: s
         log(f"   Step 5: handover.json written")
     except Exception as e:
         log(f"   Step 5 error: {e}")
+
+    # 步骤5.5: 关窗流程 — 日记/梦境/备忘/走廊/健康检查
+    log(f"   Step 5.5: running sleep routine...")
+    run_sleep_routine(session_id)
 
     # 步骤6: 自动切窗 (如果启用)
     if auto_restart:
