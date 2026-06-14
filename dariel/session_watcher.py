@@ -31,6 +31,8 @@ if str(DIR) not in sys.path:
 
 CC_PROJECT_DIR = Path.home() / ".claude" / "projects" / "C--Users-31654-Desktop"
 CC_SESSIONS_DIR = Path.home() / ".claude" / "sessions"
+CC_EXECUTABLE = Path.home() / "AppData" / "Roaming" / "npm" / "claude.cmd"
+CC_WORK_DIR = Path("C:/Users/31654/Desktop")
 CONTEXT_FILE = DIR / "session_context.txt"
 HANDOVER_FILE = DIR / "session_handover.json"
 LOG_FILE = DIR / "session_watcher.log"
@@ -43,6 +45,8 @@ FLAG_FILE = DIR / "session_handover.flag"       # 通知需要切窗
 CHECK_INTERVAL = 60           # 检查间隔(秒)
 TOKEN_WARN = 150000           # 告警水位 (200k上下文的75%)
 TOKEN_CRITICAL = 190000       # 紧急水位 (95%)
+AUTO_RESTART = True           # 紧急水位是否自动杀旧CC+开新CC
+AUTO_RESTART_AT_WARN = False  # 告警水位是否也自动切窗(默认只写交接)
 IDLE_TIMEOUT = 1800           # 无活动超时(秒)，30分钟
 HANDOVER_TURNS = 20           # 交接保留最近N轮对话
 MAX_CONTEXT_AGE = 14400       # 上下文文件最大年龄(秒)，4小时
@@ -433,6 +437,131 @@ def archive_old_session(session_id: str):
 
 
 # ═══════════════════════════════════════════════
+# 第6步: 自动切窗 — 杀旧CC + 开新CC
+# ═══════════════════════════════════════════════
+def restart_cc(session_info: dict) -> bool:
+    """自动重启 Claude Code: 杀旧进程 → 开新窗口
+
+    步骤:
+    1. 从 session_info 获取旧 CC 的 PID
+    2. taskkill 杀旧进程
+    3. 等 2 秒让进程完全退出
+    4. 归档旧 jsonl
+    5. start 新 CC 窗口 (CREATE_NEW_CONSOLE)
+    6. 新 CC 启动后 → BP1/wake.py 自动注入 session_context.txt
+
+    Returns: True if restart initiated, False on failure
+    """
+    old_pid = session_info.get("pid", 0)
+    session_id = session_info.get("session_id", "")
+    cwd = session_info.get("cwd", str(CC_WORK_DIR))
+
+    if not old_pid:
+        log("restart_cc: no PID in session info, cannot restart")
+        return False
+
+    # 步骤1: 杀旧 CC 进程
+    log(f"restart_cc: killing CC PID {old_pid}...")
+    try:
+        import subprocess
+        subprocess.run(
+            ["taskkill", "/PID", str(old_pid), "/F"],
+            capture_output=True, timeout=10
+        )
+        log(f"restart_cc: CC PID {old_pid} killed")
+    except Exception as e:
+        log(f"restart_cc: kill failed: {e}")
+        return False
+
+    # 步骤2: 等进程完全退出
+    time.sleep(2)
+
+    # 步骤3: 归档旧 jsonl
+    archive_old_session(session_id)
+
+    # 步骤4: 删掉旧 session 文件，避免新 CC 混淆
+    for sf in CC_SESSIONS_DIR.glob("*.json"):
+        try:
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            if data.get("pid") == old_pid or data.get("sessionId") == session_id:
+                sf.unlink()
+                log(f"restart_cc: removed old session file {sf.name}")
+        except:
+            pass
+
+    # 步骤5: 启动新 CC 窗口
+    log(f"restart_cc: starting new CC in {cwd}...")
+    try:
+        subprocess.Popen(
+            ["cmd", "/c", "start", "Claude Code", str(CC_EXECUTABLE)],
+            cwd=cwd,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+        log(f"restart_cc: new CC window opened")
+        return True
+    except Exception as e:
+        log(f"restart_cc: start failed: {e}")
+        return False
+
+
+def do_handover(session_id: str, token_info: dict, session_info: dict, reason: str, auto_restart: bool = False):
+    """执行完整的切窗交接流程
+
+    auto_restart=True: 交接写完后自动杀旧CC+开新CC
+    """
+    global _last_handover_session, _last_handover_time
+
+    log(f"⚠️ TRIGGER: {reason}")
+    log(f"   Session: {session_id}")
+    log(f"   Tokens: {token_info.get('total_input_tokens', 0):,} input / {token_info.get('total_output_tokens', 0):,} output")
+    log(f"   File: {token_info.get('file_name', '?')} ({token_info.get('file_size_bytes', 0):,} bytes)")
+    log(f"   Auto-restart: {auto_restart}")
+
+    # 步骤1: 提取最近20轮对话
+    turns = extract_recent_turns(session_id)
+    log(f"   Step 1: extracted {len(turns)} turns from jsonl")
+
+    # 步骤2: 写交接摘要 → memory_core pin桶
+    pin_ok = write_handover_pin(turns, token_info)
+    log(f"   Step 2: pin write {'OK' if pin_ok else 'FAIL'}")
+
+    # 步骤3: 写 session_context.txt
+    write_context_file(turns, token_info, session_info)
+    log(f"   Step 3: session_context.txt written")
+
+    # 步骤4: 写 flag 通知切窗
+    write_handover_flag(token_info)
+    log(f"   Step 4: handover flag written")
+
+    # 步骤5: 写 handover.json (兼容旧版)
+    handover_data = {
+        "generated_at": datetime.now().isoformat(),
+        "session_id": session_id,
+        "token_info": token_info,
+        "turn_count": len(turns),
+        "trigger_reason": reason,
+    }
+    try:
+        HANDOVER_FILE.write_text(json.dumps(handover_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        log(f"   Step 5: handover.json written")
+    except Exception as e:
+        log(f"   Step 5 error: {e}")
+
+    # 步骤6: 自动切窗 (如果启用)
+    if auto_restart:
+        log(f"   Step 6: auto-restarting CC...")
+        ok = restart_cc(session_info)
+        log(f"   Step 6: restart {'OK' if ok else 'FAIL'}")
+    else:
+        log(f"   Step 6: skipped (auto_restart disabled, manual switch needed)")
+
+    _last_handover_session = session_id
+    _last_handover_time = time.time()
+
+    log(f"✅ 交接完成! {'新CC已启动' if auto_restart else '等待手动切窗。'}")
+
+
+# ═══════════════════════════════════════════════
 # 主检查逻辑
 # ═══════════════════════════════════════════════
 # 跟踪已处理的 session，避免重复触发
@@ -474,13 +603,16 @@ def check_and_handover():
     # 判断是否需要触发
     needs_handover = False
     reason = ""
+    auto_restart = False
 
     if total_tokens > TOKEN_CRITICAL:
         needs_handover = True
         reason = f"TOKEN_CRITICAL: {total_tokens:,} > {TOKEN_CRITICAL:,}"
+        auto_restart = AUTO_RESTART
     elif total_tokens > TOKEN_WARN:
         needs_handover = True
         reason = f"TOKEN_WARN: {total_tokens:,} > {TOKEN_WARN:,}"
+        auto_restart = AUTO_RESTART_AT_WARN
 
     # 检查无活动超时 (从 session updated_at 判断)
     if not needs_handover and session.get("updated_at"):
@@ -501,48 +633,8 @@ def check_and_handover():
         if age < MAX_CONTEXT_AGE:
             return  # 已经触发过了，还没过期
 
-    # ═══════════════════════════════════
-    # 触发切窗交接流程!
-    # ═══════════════════════════════════
-    log(f"⚠️ TRIGGER: {reason}")
-    log(f"   Session: {session_id}")
-    log(f"   Tokens: {total_tokens:,} input / {token_info.get('total_output_tokens', 0):,} output")
-    log(f"   File: {token_info.get('file_name', '?')} ({token_info.get('file_size_bytes', 0):,} bytes)")
-
-    # 步骤1: 提取最近20轮对话
-    turns = extract_recent_turns(session_id)
-    log(f"   Step 1: extracted {len(turns)} turns from jsonl")
-
-    # 步骤2: 写交接摘要 → memory_core pin桶
-    pin_ok = write_handover_pin(turns, token_info)
-    log(f"   Step 2: pin write {'OK' if pin_ok else 'FAIL'}")
-
-    # 步骤3: 写 session_context.txt
-    write_context_file(turns, token_info, session)
-    log(f"   Step 3: session_context.txt written")
-
-    # 步骤4: 写 flag 通知切窗
-    write_handover_flag(token_info)
-    log(f"   Step 4: handover flag written")
-
-    # 步骤5: 写 handover.json (兼容旧版)
-    handover_data = {
-        "generated_at": datetime.now().isoformat(),
-        "session_id": session_id,
-        "token_info": token_info,
-        "turn_count": len(turns),
-        "trigger_reason": reason,
-    }
-    try:
-        HANDOVER_FILE.write_text(json.dumps(handover_data, ensure_ascii=False, indent=2), encoding="utf-8")
-        log(f"   Step 5: handover.json written")
-    except Exception as e:
-        log(f"   Step 5 error: {e}")
-
-    _last_handover_session = session_id
-    _last_handover_time = time.time()
-
-    log(f"✅ 交接完成! 等待手动切窗。")
+    # 执行交接 (含自动切窗)
+    do_handover(session_id, token_info, session, reason, auto_restart=auto_restart)
 
 
 # ═══════════════════════════════════════════════
