@@ -55,15 +55,20 @@ def write_messages(path: Path, data: list[dict]):
 
 def push_notify(user_id: str, nickname: str, message: str):
     """方案三: 写push标记文件，让Claude在被唤醒时直接感知新消息，
-    无需每3分钟轮询inbox.json烧上下文。"""
+    无需每3分钟轮询inbox.json烧上下文。
+
+    v2: 直接写 alarm trigger + mid_session.flag，事件驱动零延迟。
+    qq_alarm.py 保留作为兜底/健康检查。
+    """
+    now_iso = datetime.now().isoformat()
     push_data = {
         "pending": True,
-        "count": 1,  # 会被累计
+        "count": 1,
         "latest": {
             "user_id": user_id,
             "nickname": nickname,
             "message": message[:200],
-            "at": datetime.now().isoformat(),
+            "at": now_iso,
         },
     }
     # 如果已有未消费的push，累加count
@@ -71,7 +76,6 @@ def push_notify(user_id: str, nickname: str, message: str):
         existing = json.loads(PUSH_FILE.read_text(encoding="utf-8"))
         if existing.get("pending"):
             push_data["count"] = existing.get("count", 0) + 1
-            # 保留更早的latest? 不，用最新的
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
@@ -79,6 +83,64 @@ def push_notify(user_id: str, nickname: str, message: str):
     tmp.write_text(json.dumps(push_data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(PUSH_FILE)
     log(f"[push] flag written for {nickname}({user_id}), count={push_data['count']}")
+
+    # ── v2: 事件驱动 · 直接写 trigger，零延迟 ──
+    _write_alarm_trigger(user_id, nickname, message, push_data["count"], now_iso)
+
+
+def _write_alarm_trigger(user_id: str, nickname: str, message: str, count: int, alarm_at: str):
+    """直接写 alarm trigger 文件，让 CC/nudge 立即感知，跳过 qq_alarm 轮询延迟。
+
+    qq_alarm.py 保留作为兜底：如果 bridge 挂了重启后 trigger 没写，
+    qq_alarm 仍能在 10s 内补写。
+    """
+    dariel_dir = BRIDGE_DIR.parent
+    trigger_file = dariel_dir / "qq_alarm_trigger.json"
+    mid_session_flag = dariel_dir / "mid_session.flag"
+    tasks_file = Path.home() / ".claude" / "scheduled_tasks.json"
+
+    trigger_data = {
+        "nickname": nickname,
+        "message": message[:200],
+        "count": count,
+        "alarm_at": alarm_at,
+    }
+    try:
+        tmp = trigger_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(trigger_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(trigger_file)
+        log(f"[bridge→trigger] qq_alarm_trigger.json written")
+    except Exception as e:
+        log(f"[bridge→trigger] FAIL: {e}")
+
+    # mid_session.flag — 会话内 nudge 检测
+    try:
+        mid_session_flag.write_text(alarm_at)
+        log(f"[bridge→trigger] mid_session.flag written")
+    except Exception as e:
+        log(f"[bridge→trigger] mid_session.flag FAIL: {e}")
+
+    # scheduled_tasks.json — idle 唤醒
+    try:
+        tasks_dir = tasks_file.parent
+        if not tasks_dir.exists():
+            tasks_dir.mkdir(parents=True, exist_ok=True)
+        if tasks_file.exists():
+            tasks = json.loads(tasks_file.read_text(encoding="utf-8"))
+        else:
+            tasks = {}
+        tasks["qq-wake"] = {
+            "type": "qq-wake",
+            "trigger": "qq_alarm_trigger.json",
+            "alarm_at": alarm_at,
+            "created_at": alarm_at,
+        }
+        tmp = tasks_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(tasks_file)
+        log(f"[bridge→trigger] scheduled_tasks.json updated")
+    except Exception as e:
+        log(f"[bridge→trigger] scheduled_tasks.json FAIL: {e}")
 
 
 async def send_private_msg(ws, user_id: str, message: str):
