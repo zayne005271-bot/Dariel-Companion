@@ -72,52 +72,91 @@ def log(msg: str):
 # 第1步: 检测活跃 session + 真实 token 用量
 # ═══════════════════════════════════════════════
 def get_active_session() -> dict | None:
-    """读取 .claude/sessions/*.json 获取当前活跃 session 信息"""
-    if not CC_SESSIONS_DIR.exists():
-        return None
+    """获取当前活跃 session 信息。
 
-    for sf in sorted(CC_SESSIONS_DIR.glob("*.json"),
-                     key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            data = json.loads(sf.read_text(encoding="utf-8"))
-            if data.get("status") in ("busy", "idle", "active"):
-                return {
-                    "session_id": data.get("sessionId", ""),
-                    "pid": data.get("pid", 0),
-                    "cwd": data.get("cwd", ""),
-                    "status": data.get("status", ""),
-                    "started_at": data.get("startedAt", 0),
-                    "updated_at": data.get("updatedAt", 0),
-                }
-        except:
-            pass
+    优先从 .claude/sessions/*.json 读取。
+    如果不存在（新版本 CC 不再写 sessions 目录），
+    则从 projects 目录找最近修改的 jsonl（排除 .archived）。
+    """
+    # 方法1: sessions/*.json (旧版CC)
+    if CC_SESSIONS_DIR.exists():
+        for sf in sorted(CC_SESSIONS_DIR.glob("*.json"),
+                         key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                data = json.loads(sf.read_text(encoding="utf-8"))
+                if data.get("status") in ("busy", "idle", "active"):
+                    return {
+                        "session_id": data.get("sessionId", ""),
+                        "pid": data.get("pid", 0),
+                        "cwd": data.get("cwd", ""),
+                        "status": data.get("status", ""),
+                        "started_at": data.get("startedAt", 0),
+                        "updated_at": data.get("updatedAt", 0),
+                    }
+            except:
+                pass
+
+    # 方法2: projects dir 找最近活跃的 jsonl (新版CC)
+    if CC_PROJECT_DIR.exists():
+        jsonl_files = sorted(
+            [p for p in CC_PROJECT_DIR.glob("*.jsonl") if ".archived" not in p.name and not p.name.startswith(".")],
+            key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        for jf in jsonl_files:
+            sid = jf.stem
+            # 检查是否被归档
+            archived = CC_PROJECT_DIR / f"{sid}.jsonl.archived"
+            if archived.exists():
+                continue
+            return {
+                "session_id": sid,
+                "pid": 0,
+                "cwd": str(CC_WORK_DIR),
+                "status": "active",
+                "started_at": jf.stat().st_mtime,
+                "updated_at": jf.stat().st_mtime,
+            }
+
     return None
 
 
-def get_token_usage(session_id: str) -> dict:
-    """读 CC jsonl，从 usage 字段获取真实 token 用量
+def get_token_usage(session_id: str = "") -> dict:
+    """读 CC jsonl，从 usage 字段获取真实 token 用量。
 
+    session_id 为空时自动找最新的活跃 jsonl。
     Claude Code 在每次 assistant 消息的 message.usage 中记录 token 信息。
-    我们累加 input_tokens 作为上下文消耗量的近似值。
 
     Returns: {
         total_input_tokens, total_output_tokens,
         last_input_tokens, last_output_tokens,
-        line_count, usage_entry_count, file_size_bytes
+        line_count, usage_entry_count, file_size_bytes, file_name, session_id
     }
     """
     if not CC_PROJECT_DIR.exists():
         return {"total_input_tokens": 0, "error": "CC project dir not found"}
 
-    # 找对应 session 的 jsonl
-    jsonl_path = CC_PROJECT_DIR / f"{session_id}.jsonl"
-    if not jsonl_path.exists():
-        # 可能是旧 session 被归档了，找最新的
-        jsonl_files = sorted(CC_PROJECT_DIR.glob("*.jsonl"),
-                            key=lambda p: p.stat().st_mtime, reverse=True)
-        if not jsonl_files:
-            return {"total_input_tokens": 0, "error": "no jsonl found"}
-        jsonl_path = jsonl_files[0]
+    jsonl_path = None
+
+    # 优先用指定的 session_id
+    if session_id:
+        path = CC_PROJECT_DIR / f"{session_id}.jsonl"
+        if path.exists():
+            jsonl_path = path
+
+    # 否则找最新的非归档 jsonl
+    if not jsonl_path:
+        jsonl_files = sorted(
+            [p for p in CC_PROJECT_DIR.glob("*.jsonl") if ".archived" not in p.name and not p.name.startswith(".")],
+            key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        for jf in jsonl_files:
+            archived = CC_PROJECT_DIR / f"{jf.stem}.jsonl.archived"
+            if not archived.exists():
+                jsonl_path = jf
+                break
+
+    if not jsonl_path:
+        return {"total_input_tokens": 0, "error": "no active jsonl found"}
 
     total_input = 0
     total_output = 0
@@ -157,6 +196,7 @@ def get_token_usage(session_id: str) -> dict:
         "usage_entry_count": usage_count,
         "file_size_bytes": jsonl_path.stat().st_size if jsonl_path.exists() else 0,
         "file_name": jsonl_path.name,
+        "session_id": jsonl_path.stem,
     }
 
 
@@ -561,10 +601,24 @@ def restart_cc(session_info: dict) -> bool:
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
         log(f"restart_cc: new CC window opened")
-        return True
     except Exception as e:
         log(f"restart_cc: start failed: {e}")
         return False
+
+    # 步骤6: 拉起独立守望 — qq_watch 脱离 CC 运行，换窗不丢消息
+    time.sleep(3)
+    try:
+        qq_watch_py = DIR / "qq_watch.py"
+        subprocess.Popen(
+            ["pythonw", "-u", str(qq_watch_py)],
+            cwd=str(DIR),
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        log(f"restart_cc: qq_watch restarted as independent process")
+    except Exception as e:
+        log(f"restart_cc: qq_watch restart failed: {e}")
+
+    return True
 
 
 def do_handover(session_id: str, token_info: dict, session_info: dict, reason: str, auto_restart: bool = False):
@@ -652,15 +706,14 @@ def check_and_handover():
             except:
                 pass
 
-    # 获取活跃 session
+    # 获取活跃 session（优先 sessions/*.json，兜底 projects/*.jsonl）
     session = get_active_session()
-    if not session:
-        return  # 没有活跃CC会话，不检查
+    session_id = session["session_id"] if session else ""
 
-    session_id = session["session_id"]
-
-    # 获取真实 token 用量
+    # 获取真实 token 用量（session_id 为空时自动找最新 jsonl）
     token_info = get_token_usage(session_id)
+    if not session_id and token_info.get("session_id"):
+        session_id = token_info["session_id"]
     total_tokens = token_info.get("total_input_tokens", 0)
 
     if "error" in token_info:
