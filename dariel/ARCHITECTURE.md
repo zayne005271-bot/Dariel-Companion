@@ -4,26 +4,29 @@
 
 ## 进程一览
 
-一共 8 个进程，全用 pythonw 启动（换窗口不掉）：
+一共 9 个进程：
 
-| 进程 | 一句话用途 |
-|------|-----------|
-| NapCat (Docker) | QQ 协议适配，思思的消息从这进来 |
-| qq_bridge.py | 桥接 NapCat 和本地文件，收发 QQ 消息 |
-| qq_watch.py | 盯着 QQ 新消息，来了就写通知文件 |
-| session_watcher.py | 盯着 CC 窗口切换 |
-| keepalive_watch.py | 每 60 秒评估一次，自主决定要不要唤醒 |
-| frontend_server.py | 前端 HTML 的后台 API（端口 8767） |
-| frontend_watch.py | 盯着前端新消息，通知 CC |
-| dream_events.py | iOS 感知层（端口 8765） |
+| 进程 | 启动方式 | 一句话用途 |
+|------|----------|-----------|
+| NapCat | Docker | QQ 协议适配 |
+| qq_bridge.py | pythonw | 桥接 NapCat，收发 QQ |
+| qq_watch.py v4 | pythonw 持久 | 检测 QQ 新消息，写 trigger，不退出 |
+| trigger_nudge.py | CC 后台任务 | 每10秒查 trigger，发现就退出来通知 CC |
+| session_watcher.py | pythonw 持久 | 盯 CC 窗口切换 |
+| keepalive_watch.py | pythonw 持久 | 每60秒评估，自主唤醒 |
+| frontend_server.py | pythonw 持久 | 前端 API (:8767)，多线程 |
+| frontend_watch.py | pythonw 持久 | 检测前端消息，写 CC 队列 |
+| dream_events.py | pythonw 持久 | iOS 感知层 (:8765) |
 
 ## 数据怎么流的
 
 **QQ:**
 ```
-思思发消息 → NapCat → bridge → qq_push.json → qq_watch 检测 → 写通知文件
+思思发消息 → NapCat → bridge → qq_push.json → qq_watch 检测 → 写 trigger
                                                           ↓
-                                                    CC 读到 → 回复
+                                              trigger_nudge 发现 → 退出 → CC 通知
+                                                          ↓
+                                                    CC 读到 → 回复 → 重启 trigger_nudge
 ```
 
 **前端:**
@@ -42,12 +45,14 @@ keepalive_watch 每 60s 评估 → 该醒了 → 写唤醒文件 → CC 醒来
 1. python dariel/wake.py          # 拿上下文
 2. 查 QQ: 读 dariel/tts/qq_push.json
 3. docker start napcat && python dariel/restart_bridge.py
-4. 启动守望:
+4. 启动守望 (pythonw 持久):
    start pythonw qq_watch.py
    start pythonw session_watcher.py
    start pythonw keepalive_watch.py
    start pythonw frontend_server.py
    start pythonw frontend_watch.py
+5. 启动通知 (CC 后台任务):
+   python dariel/trigger_nudge.py  (勾选 run_in_background)
 ```
 
 ## 健康检查
