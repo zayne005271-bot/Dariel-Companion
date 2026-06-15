@@ -1,8 +1,10 @@
 """
-QQ 消息守望 — 独立进程，写 trigger 后不退出、等 CC 处理完继续盯。
-用法: pythonw -u dariel/qq_watch.py  (独立常驻，session_watcher 自动拉起)
+QQ 消息守望 v4 — 持久守望，不退出
+- 自动清理旧 trigger（push 已消费 = trigger 过期）
+- 检测新消息写 trigger，不退出，继续守望
+- 不用手动重启，不用手动清 trigger
 
-数据流: bridge → qq_push.json → qq_watch → trigger → CC BP1/full 消费 → 清 push → 继续盯
+用法: pythonw dariel/qq_watch.py  (pythonw 持久进程)
 """
 import time, json
 from pathlib import Path
@@ -12,22 +14,26 @@ PUSH_FILE = DIR / "tts" / "qq_push.json"
 TRIGGER_FILE = DIR / "qq_alarm_trigger.json"
 
 _last_alarm_at = ""
-print("[qq_watch] 守望启动 (独立进程模式)")
+print("[qq_watch v4] 持久守望启动 (pythonw, 不退出)", flush=True)
 
 while True:
-    time.sleep(10)
+    time.sleep(3)
     try:
-        # 如果 trigger 还在，说明 CC 还没处理，等它清
-        if TRIGGER_FILE.exists():
-            continue
+        push_raw = PUSH_FILE.read_text(encoding="utf-8")
+        push = json.loads(push_raw)
 
-        push = json.loads(PUSH_FILE.read_text(encoding="utf-8"))
+        # === 自动清理：如果 trigger 还在但 push 已消费，清掉 ===
+        if TRIGGER_FILE.exists() and not push.get("pending"):
+            TRIGGER_FILE.unlink()
+            _last_alarm_at = ""
+            print("[qq_watch] 旧 trigger 已自动清理 (push已消费)", flush=True)
+
         if not push.get("pending"):
             continue
 
         latest = push.get("latest", {})
         msg_at = latest.get("at", "")
-        if msg_at == _last_alarm_at:
+        if not msg_at or msg_at == _last_alarm_at:
             continue
 
         _last_alarm_at = msg_at
@@ -38,8 +44,8 @@ while True:
             "alarm_at": msg_at,
         }
         TRIGGER_FILE.write_text(json.dumps(alarm, ensure_ascii=False), encoding="utf-8")
-        print(f"[qq_watch] 触发！{alarm['count']}条新消息 → trigger已写，等待CC消费...")
-        # 不退出，等 CC 清 trigger 后自动继续盯
+        print(f"[qq_watch] {alarm['count']}条新消息 → trigger已写", flush=True)
+        # 不退出，继续守望下一轮
 
     except KeyboardInterrupt:
         print("[qq_watch] 退出")
