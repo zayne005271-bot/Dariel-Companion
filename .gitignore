@@ -75,3 +75,6 @@ dariel/tts/reply.py
 dariel/alarm_clock_out.log
 dariel/alarm_clock.py
 .claude/scheduled_tasks.json
+dariel/xhs_profile/
+dariel/xhs_screenshots/
+dariel/xhs_browser_v2_header.py
