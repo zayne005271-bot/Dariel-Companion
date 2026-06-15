@@ -1,7 +1,16 @@
-"""小红书自主浏览器 — 持久化登录态，不用每次都确认
+"""小红书自主浏览器 v2 — Playwright-Stealth + 持久化Profile
 
-首次运行: 打开浏览器 → 思思扫码登录 → 保存登录态
-后续运行: 无头模式自动刷 → 存内容 → OCR图片 → 分享给思思
+核心升级:
+1. playwright-stealth 全面隐藏自动化特征
+2. 持久化浏览器 profile (cookies/localStorage/cache 跨会话保留)
+3. 真实 Chrome 指纹伪装（插件、字体、WebGL、canvas）
+4. 登录态持久化到 profile，无需每次扫码
+
+用法:
+  python xhs_browser.py --login          # 首次登录(有头浏览器)
+  python xhs_browser.py                  # 无头浏览探索页
+  python xhs_browser.py --link <url>     # 打开具体笔记
+  python xhs_browser.py --headed         # 有头模式(调试用)
 """
 
 import json
@@ -13,12 +22,20 @@ from playwright.sync_api import sync_playwright
 
 DIR = Path(__file__).parent
 BRIDGE_DIR = DIR / "tts"
-AUTH_FILE = DIR / "xhs_auth.json"
+PROFILE_DIR = DIR / "xhs_profile"          # 持久化浏览器profile（替代旧的AUTH_FILE）
+AUTH_FILE = DIR / "xhs_auth.json"          # 保留兼容
 CONTENT_FILE = DIR / "xhs_content.json"
 OUTBOX_FILE = BRIDGE_DIR / "outbox.json"
 SCREENSHOT_DIR = DIR / "xhs_screenshots"
 
-# 反检测：XHS会检查webdriver标记、headless特征等
+# 真实 Chrome 125 UA
+REAL_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
+
+# 启动参数：关闭所有自动化检测标记
 STEALTH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--disable-features=IsolateOrigins,site-per-process",
@@ -26,73 +43,204 @@ STEALTH_ARGS = [
     "--disable-gpu-sandbox",
     "--disable-dev-shm-usage",
     "--disable-infobars",
-    "--window-size=1280,800",
+    "--disable-setuid-sandbox",
+    "--disable-web-security",
+    "--disable-features=VizDisplayCompositor",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--hide-scrollbars",
+    "--metrics-recording-only",
+    "--mute-audio",
+    "--no-first-run",
+    "--window-size=1440,900",
+    "--window-position=0,0",
 ]
 
 
-def _create_stealth_context(playwright, headless=True):
-    """创建带反检测的浏览器context，统一入口"""
-    browser = playwright.chromium.launch(
+def _create_persistent_context(playwright, headless=True):
+    """创建带持久化 profile 的浏览器 context，统一入口
+
+    核心反检测:
+    - 持久化 user_data_dir: cookies/localStorage/cache 跨会话保留
+    - launch_persistent_context: 使用真实浏览器 profile 目录
+    - 全面的 chrome 指纹参数
+    """
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
+    context = playwright.chromium.launch_persistent_context(
+        user_data_dir=str(PROFILE_DIR),
         headless=headless,
         args=STEALTH_ARGS,
-    )
-    context = browser.new_context(
-        storage_state=str(AUTH_FILE) if AUTH_FILE.exists() else None,
-        viewport={"width": 1280, "height": 800},
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/125.0.0.0 Safari/537.36"
-        ),
+        viewport={"width": 1440, "height": 900},
+        user_agent=REAL_CHROME_UA,
         locale="zh-CN",
         timezone_id="Asia/Shanghai",
+        permissions=["geolocation"],
+        geolocation={"latitude": 30.5728, "longitude": 104.0668},  # 成都
+        color_scheme="light",
+        device_scale_factor=1,
+        is_mobile=False,
+        has_touch=False,
+        java_script_enabled=True,
+        bypass_csp=True,
+        ignore_https_errors=True,
     )
-    # 最关键：隐藏webdriver标记
-    context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-        Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
-        window.chrome = {runtime: {}};
+    return context
+
+
+def _apply_stealth(page):
+    """对页面应用 playwright-stealth + 补充 init script
+
+    两层防护:
+    1. playwright-stealth 官方库 (覆盖 webdriver/plugins/chrome/webgl/fonts)
+    2. 补充 init script (覆盖 mimeTypes/hardwareConcurrency/deviceMemory/connection)
+    """
+    try:
+        from playwright_stealth import Stealth
+        s = Stealth(
+            navigator_languages=["zh-CN", "zh", "en-US", "en"],
+            navigator_vendor="Google Inc.",
+            navigator_platform="Win32",
+            webgl_vendor="Google Inc. (NVIDIA)",
+            hairline=True,
+        )
+        s.apply_stealth_sync(page)
+        print("[xhs] playwright-stealth applied")
+    except ImportError:
+        print("[xhs] playwright-stealth not installed, using manual evasions only")
+
+    # 补充 init script — 填补遗漏的检测点
+    page.add_init_script("""
+        // 1. webdriver (双保险)
+        Object.defineProperty(navigator, 'webdriver', {get: () => false});
+
+        // 2. plugins 完整伪造 (真实Chrome有5个插件)
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => {
+                const plugins = [
+                    {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
+                    {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
+                    {name: 'Native Client', filename: 'internal-nacl-plugin', description: ''},
+                ];
+                plugins.item = (i) => plugins[i] || null;
+                plugins.namedItem = (name) => plugins.find(p => p.name === name) || null;
+                plugins.refresh = () => {};
+                Object.setProperty(plugins, 'length', plugins.length);
+                return plugins;
+            }
+        });
+
+        // 3. mimeTypes
+        Object.defineProperty(navigator, 'mimeTypes', {
+            get: () => {
+                const mimeTypes = [
+                    {type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format'},
+                    {type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format'},
+                ];
+                mimeTypes.item = (i) => mimeTypes[i] || null;
+                mimeTypes.namedItem = (name) => mimeTypes.find(m => m.type === name) || null;
+                Object.setProperty(mimeTypes, 'length', mimeTypes.length);
+                return mimeTypes;
+            }
+        });
+
+        // 4. chrome 对象完整
+        window.chrome = {
+            runtime: {},
+            loadTimes: function() {},
+            csi: function() {},
+            app: {}
+        };
+
+        // 5. 通知权限查询 (不弹窗)
+        const origQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (params) => (
+            params.name === 'notifications' ?
+                Promise.resolve({ state: Notification.permission }) :
+                origQuery(params)
+        );
+
+        // 6. 硬件指纹
+        Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 16});
+        Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+
+        // 7. 移除 PhantomJS 等检测痕迹
+        delete window.callPhantom;
+        delete window._phantom;
+        delete window.__phantomas;
+
+        // 8. 网络连接信息
+        Object.defineProperty(navigator, 'connection', {
+            get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10, saveData: false })
+        });
     """)
-    page = context.new_page()
-    return browser, context, page
 
 
 def login():
-    """首次登录 — 开一个有头浏览器让思思扫码"""
-    print("[xhs] 打开浏览器，请扫码登录小红书...")
+    """首次登录 — 有头浏览器，扫码后持久化到 profile"""
+    print("[xhs] 打开有头浏览器，请扫码登录小红书...")
+    print("[xhs] 登录成功后浏览器保持打开30秒确认，然后自动保存。")
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
-        page.goto("https://www.xiaohongshu.com", wait_until="networkidle")
+        context = _create_persistent_context(p, headless=False)
+        page = context.pages[0] if context.pages else context.new_page()
+        _apply_stealth(page)
+
+        page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(2000)
 
-        print("[xhs] 请在弹出的浏览器中扫码登录，登录后按Enter继续...")
-        input()
+        # 尝试点击登录按钮（如果有弹窗）
+        try:
+            login_btn = page.query_selector('text=登录')
+            if login_btn:
+                login_btn.click()
+                page.wait_for_timeout(1000)
+        except Exception:
+            pass
 
-        browser.contexts[0].storage_state(path=str(AUTH_FILE))
-        browser.close()
-        print("[xhs] 登录态已保存")
+        print("[xhs] 请在浏览器中扫码登录...")
+        page.wait_for_timeout(30000)
+
+        # 检测登录状态
+        logged_in = False
+        try:
+            user_el = page.query_selector('[class*="avatar"], .user-avatar, [class*="user"]')
+            if user_el:
+                logged_in = True
+        except Exception:
+            pass
+
+        if logged_in:
+            print("[xhs] 登录成功！profile 已保存到 dariel/xhs_profile/")
+        else:
+            print("[xhs] 未检测到登录，请确认扫码成功。可重新运行 --login。")
+
+        page.wait_for_timeout(3000)
+        context.close()
 
 
 def browse_headless():
-    """无头模式 — 用自己的登录态刷小红书"""
-    if not AUTH_FILE.exists():
-        print("[xhs] 未登录，请先运行: python xhs_browser.py --login")
-        return None, None
-
+    """无头模式 — 用自己的登录态刷小红书 (v2: 持久化 profile)"""
     with sync_playwright() as p:
-        browser, context, page = _create_stealth_context(p, headless=True)
+        context = _create_persistent_context(p, headless=True)
+        page = context.pages[0] if context.pages else context.new_page()
+        _apply_stealth(page)
 
         all_items = []
 
-        # 刷探索页 — .note-item 是独立卡片
         try:
-            page.goto("https://www.xiaohongshu.com/explore", wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
+            page.goto("https://www.xiaohongshu.com/explore", wait_until="domcontentloaded", timeout=45000)
+
+            # 模拟人类行为: 随机滚动几次
+            for _ in range(random.randint(2, 4)):
+                page.mouse.wheel(0, random.randint(300, 800))
+                page.wait_for_timeout(random.randint(800, 1500))
+
+            page.wait_for_timeout(2000)
 
             seen_urls = set()
             note_items = page.query_selector_all('.note-item')
+            print(f"[xhs] 探索页找到 {len(note_items)} 个卡片")
+
             for item in note_items:
                 try:
                     text = item.inner_text().strip()
@@ -100,6 +248,11 @@ def browse_headless():
                         continue
 
                     link = item.query_selector('a[href*="/explore/"]')
+                    if not link:
+                        link = item.query_selector('a[href*="/search_result/"]')
+                    if not link:
+                        link = item.query_selector('a[href*="/discovery/"]')
+
                     href = link.get_attribute("href") if link else ""
                     if not href:
                         continue
@@ -123,11 +276,17 @@ def browse_headless():
 
         except Exception as e:
             print(f"[xhs] 探索页加载失败: {e}")
+            # 诊断信息
+            try:
+                body_text = page.inner_text('body')[:200]
+                print(f"[xhs] 页面内容(前200字): {body_text}")
+            except Exception:
+                pass
 
         # 提取封面图并OCR (如果easyocr可用)
         screenshots = ocr_cover_images(page, note_items, all_items, max_notes=3)
 
-        browser.close()
+        context.close()
 
         if screenshots:
             save_manifest(screenshots)
@@ -136,41 +295,59 @@ def browse_headless():
 
 
 def view_note(url):
-    """打开具体笔记链接，提取标题+正文+图片OCR"""
-    if not AUTH_FILE.exists():
-        print("[xhs] 未登录，请先运行: python xhs_browser.py --login")
-        return None
-
+    """打开具体笔记链接，提取标题+正文+图片OCR (v2: 持久化 profile)"""
     with sync_playwright() as p:
-        browser, context, page = _create_stealth_context(p, headless=True)
-
-        try:
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
-        except Exception as e:
-            print(f"[xhs] 笔记加载失败: {e}")
-            browser.close()
-            return None
+        context = _create_persistent_context(p, headless=True)
+        page = context.pages[0] if context.pages else context.new_page()
+        _apply_stealth(page)
 
         note = {"url": url, "source": "分享链接", "found_at": datetime.now().isoformat()}
 
-        # 提取标题
         try:
-            title_el = page.query_selector('#detail-title, .title, h1')
-            if not title_el:
-                title_el = page.query_selector('[class*="title"]')
-            note["title"] = title_el.inner_text().strip()[:120] if title_el else "无标题"
-        except Exception:
-            note["title"] = "无标题"
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
-        # 提取正文
-        try:
-            desc_el = page.query_selector('#detail-desc, .note-text, [class*="desc"]')
-            if not desc_el:
-                desc_el = page.query_selector('.content, [class*="content"]')
-            note["content"] = desc_el.inner_text().strip()[:2000] if desc_el else ""
-        except Exception:
-            note["content"] = ""
+            # 模拟人类: 等3秒+轻微滚动
+            page.wait_for_timeout(random.randint(2500, 4000))
+            page.mouse.wheel(0, random.randint(100, 300))
+            page.wait_for_timeout(1000)
+
+            # 提取标题 (多个选择器尝试)
+            for sel in ['#detail-title', '.title', 'h1', '[class*="title"]', '#note-title', '.note-scroller h1']:
+                try:
+                    title_el = page.query_selector(sel)
+                    if title_el:
+                        note["title"] = title_el.inner_text().strip()[:200]
+                        break
+                except Exception:
+                    continue
+            if "title" not in note:
+                note["title"] = page.title()[:120] or "无标题"
+
+            # 提取正文
+            for sel in ['#detail-desc', '.note-text', '[class*="desc"]', '.note-content', '[class*="content"]', '.note-scroller .content']:
+                try:
+                    desc_el = page.query_selector(sel)
+                    if desc_el:
+                        content = desc_el.inner_text().strip()
+                        if content and len(content) > 10:
+                            note["content"] = content[:2000]
+                            break
+                except Exception:
+                    continue
+            if "content" not in note:
+                try:
+                    body = page.inner_text('body')
+                    lines = [l.strip() for l in body.split('\n') if len(l.strip()) > 15]
+                    note["content"] = '\n'.join(lines[:20])[:2000]
+                except Exception:
+                    note["content"] = ""
+
+        except Exception as e:
+            print(f"[xhs] 笔记加载失败: {e}")
+            note["title"] = "加载失败"
+            note["content"] = str(e)[:500]
+            context.close()
+            return note
 
         # 提取图片并OCR
         screenshots = []
@@ -217,7 +394,7 @@ def view_note(url):
             if ocr_texts:
                 note["ocr_texts"] = ocr_texts
 
-        browser.close()
+        context.close()
 
         if screenshots:
             save_manifest(screenshots)
@@ -357,8 +534,57 @@ def share_to_qq(items):
     print(f"[xhs] 分享了 {len(pick)} 条到QQ")
 
 
-def run(no_push=False):
-    result = browse_headless()
+def run(no_push=False, headless=True):
+    """v2 入口：浏览 + 保存 + 分享"""
+    if headless:
+        result = browse_headless()
+    else:
+        # 有头模式复用 browse_headless 逻辑但 headless=False
+        with sync_playwright() as p:
+            context = _create_persistent_context(p, headless=False)
+            page = context.pages[0] if context.pages else context.new_page()
+            _apply_stealth(page)
+            all_items = []
+            try:
+                page.goto("https://www.xiaohongshu.com/explore", wait_until="domcontentloaded", timeout=45000)
+                for _ in range(random.randint(2, 4)):
+                    page.mouse.wheel(0, random.randint(300, 800))
+                    page.wait_for_timeout(random.randint(800, 1500))
+                page.wait_for_timeout(2000)
+                seen_urls = set()
+                note_items = page.query_selector_all('.note-item')
+                print(f"[xhs] 探索页(有头) 找到 {len(note_items)} 个卡片")
+                for item in note_items:
+                    try:
+                        text = item.inner_text().strip()
+                        if not text or len(text) < 4:
+                            continue
+                        link = item.query_selector('a[href*="/explore/"]')
+                        if not link:
+                            link = item.query_selector('a[href*="/search_result/"]')
+                        if not link:
+                            link = item.query_selector('a[href*="/discovery/"]')
+                        href = link.get_attribute("href") if link else ""
+                        if not href:
+                            continue
+                        base_url = href.split("?")[0]
+                        if base_url in seen_urls:
+                            continue
+                        seen_urls.add(base_url)
+                        if not href.startswith("http"):
+                            href = "https://www.xiaohongshu.com" + href
+                        all_items.append({
+                            "title": text[:120], "url": href,
+                            "source": "小红书探索", "found_at": datetime.now().isoformat(),
+                        })
+                    except Exception:
+                        continue
+            except Exception as e:
+                print(f"[xhs] 探索页加载失败: {e}")
+            screenshots = ocr_cover_images(page, note_items, all_items, max_notes=3)
+            context.close()
+            result = all_items, screenshots
+
     if result is None:
         return
     items, screenshots = result
@@ -378,7 +604,9 @@ def run(no_push=False):
 
 if __name__ == "__main__":
     import sys
+    headless = "--headed" not in sys.argv
     no_push = "--no-push" in sys.argv
+
     if "--login" in sys.argv:
         login()
     elif "--link" in sys.argv:
@@ -389,11 +617,11 @@ if __name__ == "__main__":
             if note:
                 print(f"[xhs] 标题: {note.get('title', '?')}")
                 if note.get("content"):
-                    print(f"[xhs] 正文:\n{note['content']}")
+                    print(f"[xhs] 正文:\n{note['content'][:500]}")
                 if note.get("ocr_texts"):
                     for i, t in enumerate(note["ocr_texts"]):
-                        print(f"[xhs] OCR[{i}]: {t}")
+                        print(f"[xhs] OCR[{i}]: {t[:200]}")
         else:
             print("[xhs] --link 需要URL参数")
     else:
-        run(no_push=no_push)
+        run(no_push=no_push, headless=headless)

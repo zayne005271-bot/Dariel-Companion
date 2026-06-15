@@ -1,9 +1,11 @@
 {
   "mcpServers": {
-    "dariel-unified": {
-      "command": "D:/Python/python.exe",
-      "args": ["-u", "dariel/unified_mcp.py"],
-      "cwd": "C:/Users/31654/Desktop"
+    "xhs-browser": {
+      "command": "python",
+      "args": [
+        "dariel/xhs_mcp_server.py"
+      ],
+      "description": "Xiaohongshu browser with stealth anti-detection and persistent login"
     }
   }
 }
