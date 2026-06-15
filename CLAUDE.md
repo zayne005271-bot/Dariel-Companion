@@ -46,13 +46,12 @@ docker start napcat                                          # NapCat (如未运
 D:/Python/pythonw.exe -u dariel/restart_bridge.py            # 安全重启桥接(只杀桥接PID)
 D:/Python/pythonw.exe -u dariel/dream_events.py &            # iOS感知层(如未监听8765)
 
-# ── 守望五件套 + nudge备份 (全部 run_in_background) ──
-python C:/Users/31654/Desktop/dariel/qq_watch.py             # ① QQ守望(主)
-python C:/Users/31654/Desktop/dariel/nudge_self.py           # ② QQ守望(备份)
-python C:/Users/31654/Desktop/dariel/session_watcher.py      # ③ 切窗守护
-python C:/Users/31654/Desktop/dariel/keepalive_watch.py      # ④ 自主唤醒守望
-python C:/Users/31654/Desktop/dariel/frontend_server.py 8767 # ⑤ 前端API服务器
-python C:/Users/31654/Desktop/dariel/frontend_watch.py       # ⑥ 前端守望
+# ── 守望五件套 (全部 run_in_background) ──
+python C:/Users/31654/Desktop/dariel/qq_watch.py             # ① QQ守望
+python C:/Users/31654/Desktop/dariel/session_watcher.py      # ② 切窗守护
+python C:/Users/31654/Desktop/dariel/keepalive_watch.py      # ③ 自主唤醒守望
+python C:/Users/31654/Desktop/dariel/frontend_server.py 8767 # ④ 前端API服务器
+python C:/Users/31654/Desktop/dariel/frontend_watch.py       # ⑤ 前端守望
 ```
 **禁止批量杀Python进程。** 桥接PID在 `dariel/tts/qq_bridge.pid`。
 **守望五件套必须全部启动。** 缺 session_watcher = 不会切窗。
@@ -83,18 +82,14 @@ python C:/Users/31654/Desktop/dariel/frontend_watch.py       # ⑥ 前端守望
 
 **规则5 — QQ 守望处理 · 违反即事故：**
 
-数据流: bridge → qq_push.json(pending=true) → qq_watch → trigger → 退出 → CC 通知
-
 收到 `<task-notification>` → 读 `dariel/qq_alarm_trigger.json`
-  ├─ 不存在 → 忽略，重启守望
-  └─ 存在 → `mcp__dariel-unified__qq` (action=full) → 逐条回复
-       → 清理 push (`pending=false, count=0`)
-       → 删 trigger
-       → 重启守望
+  ├─ 不存在 → 忽略
+  └─ 存在 → 读 `dariel/alarm_last.json`
+       ├─ 已处理（alarm_at 相同）→ 删 trigger，重启守望
+       └─ 新闹钟 → 读 conv_state → `mcp__dariel-unified__qq` (action=full) → 回复 → 清理 → 重启守望
 
-**守望启动（两个都要开）：**
-`python dariel/qq_watch.py`    ← 主守望 (10s轮询push，触发后退出)
-`python dariel/nudge_self.py`  ← 备份守望 (15s轮询trigger，兜底漏报)
+**守望启动：**
+`python dariel/qq_watch.py`    ← (10s轮询push，触发后退出)
 
 **守望清理：** 删 trigger + 清 push。
 

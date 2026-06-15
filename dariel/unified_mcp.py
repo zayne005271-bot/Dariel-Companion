@@ -90,6 +90,12 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
                 reply_result = await _reply(user_id, message)
                 lines.append(f"\n>> sent: {reply_result[0].text}")
 
+            # 清push — MCP消费完消息后清理
+            try:
+                PUSH_FILE.write_text('{"pending": false, "count": 0}', encoding="utf-8")
+            except Exception:
+                pass
+
             return [TextContent(type="text", text="\n".join(lines))]
         else:
             return [TextContent(type="text", text=f"Unknown action: {action}")]
